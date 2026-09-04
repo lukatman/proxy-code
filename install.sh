@@ -121,11 +121,6 @@ PublicKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=
 Endpoint = 127.0.0.1:1
 AllowedIPs = 0.0.0.0/0
 
-[Socks5]
-BindAddress = 127.0.0.1:25344
-Username = proxycode
-Password = compatibility-check
-
 [HTTP]
 BindAddress = 127.0.0.1:25345
 Username = proxycode

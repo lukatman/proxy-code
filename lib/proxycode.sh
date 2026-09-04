@@ -72,7 +72,6 @@ proxycode_prepare_storage() {
   if [[ ! -e $PROXYCODE_CONFIG_DIR/settings ]]; then
     proxycode_write_private "$PROXYCODE_CONFIG_DIR/settings" <<'EOF' || return 1
 HTTP_PORT=25345
-SOCKS_PORT=25344
 DEFAULT_PROFILE=
 EOF
   fi
@@ -81,16 +80,13 @@ EOF
 proxycode_load_global_settings() {
   proxycode_prepare_storage || return
   PROXYCODE_HTTP_PORT=$(proxycode_read_setting "$PROXYCODE_CONFIG_DIR/settings" HTTP_PORT)
-  PROXYCODE_SOCKS_PORT=$(proxycode_read_setting "$PROXYCODE_CONFIG_DIR/settings" SOCKS_PORT)
   PROXYCODE_DEFAULT_PROFILE=$(proxycode_read_setting "$PROXYCODE_CONFIG_DIR/settings" DEFAULT_PROFILE)
-  proxycode_validate_port "$PROXYCODE_HTTP_PORT" && proxycode_validate_port "$PROXYCODE_SOCKS_PORT" &&
-    [[ $PROXYCODE_HTTP_PORT != "$PROXYCODE_SOCKS_PORT" ]] || proxycode_error 'global settings are invalid; repair or remove the settings file'
+  proxycode_validate_port "$PROXYCODE_HTTP_PORT" || proxycode_error 'global settings are invalid; repair or remove the settings file'
 }
 
 proxycode_save_global_settings() {
   proxycode_write_private "$PROXYCODE_CONFIG_DIR/settings" <<EOF
 HTTP_PORT=$PROXYCODE_HTTP_PORT
-SOCKS_PORT=$PROXYCODE_SOCKS_PORT
 DEFAULT_PROFILE=$PROXYCODE_DEFAULT_PROFILE
 EOF
 }
@@ -126,7 +122,7 @@ proxycode_profile_show() {
 
 proxycode_settings_show() {
   proxycode_load_global_settings || return
-  printf 'HTTP port: %s\nSOCKS port: %s\n' "$PROXYCODE_HTTP_PORT" "$PROXYCODE_SOCKS_PORT"
+  printf 'HTTP port: %s\n' "$PROXYCODE_HTTP_PORT"
 }
 
 proxycode_validate_port() {
@@ -134,50 +130,10 @@ proxycode_validate_port() {
 }
 
 proxycode_settings_update() {
-  local http_port=$1 socks_port=$2 profile staged backup committed=0 index failed=false
-  local -a staged_configs=() backups=() profiles=()
+  local http_port=$1
   proxycode_load_global_settings || return
   [[ -z $http_port ]] || { proxycode_validate_port "$http_port" || { proxycode_error 'HTTP port must be an integer in 1..65535' 2; return; }; PROXYCODE_HTTP_PORT=$((10#$http_port)); }
-  [[ -z $socks_port ]] || { proxycode_validate_port "$socks_port" || { proxycode_error 'SOCKS port must be an integer in 1..65535' 2; return; }; PROXYCODE_SOCKS_PORT=$((10#$socks_port)); }
-  [[ $PROXYCODE_HTTP_PORT != "$PROXYCODE_SOCKS_PORT" ]] || { proxycode_error 'HTTP and SOCKS ports must be distinct' 2; return; }
-
-  for profile in "$PROXYCODE_DATA_DIR"/profiles/*; do
-    [[ -d $profile ]] || continue
-    staged=$profile/wireproxy.conf.new.$$
-    backup=$profile/wireproxy.conf.old.$$
-    proxycode_generate_wireproxy_config "$profile" "$staged" || { failed=true; break; }
-    cp -p -- "$profile/wireproxy.conf" "$backup" || { failed=true; break; }
-    profiles+=("$profile")
-    staged_configs+=("$staged")
-    backups+=("$backup")
-  done
-  if $failed; then
-    rm -f -- "${staged_configs[@]}" "${backups[@]}" "$staged" "$backup"
-    proxycode_error 'could not prepare updated WireProxy configurations'
-    return
-  fi
-  for index in "${!profiles[@]}"; do
-    if ! mv -f -- "${staged_configs[index]}" "${profiles[index]}/wireproxy.conf"; then
-      for ((index = committed - 1; index >= 0; index--)); do
-        mv -f -- "${backups[index]}" "${profiles[index]}/wireproxy.conf" ||
-          proxycode_error 'could not restore a generated configuration; its private backup was retained'
-      done
-      rm -f -- "${staged_configs[@]}" "${backups[@]:committed}" ||
-        proxycode_error 'could not clean up redundant configuration backups'
-      proxycode_error 'could not update WireProxy configurations'
-      return
-    fi
-    committed=$((committed + 1))
-  done
-  if ! proxycode_save_global_settings; then
-    for index in "${!profiles[@]}"; do
-      mv -f -- "${backups[index]}" "${profiles[index]}/wireproxy.conf" ||
-        proxycode_error 'could not restore a generated configuration; its private backup was retained'
-    done
-    proxycode_error 'could not save global settings'
-    return
-  fi
-  rm -f -- "${backups[@]}"
+  proxycode_save_global_settings || return
   proxycode_settings_show
 }
 
@@ -257,11 +213,6 @@ proxycode_generate_wireproxy_config() {
   [[ $username == proxy-code && -n $password ]] || return 1
   proxycode_write_private "$target" <<EOF
 WGConfig = wireguard.conf
-
-[Socks5]
-BindAddress = 127.0.0.1:$PROXYCODE_SOCKS_PORT
-Username = $username
-Password = $password
 
 [HTTP]
 BindAddress = 127.0.0.1:$PROXYCODE_HTTP_PORT
@@ -589,7 +540,7 @@ proxycode_start_locked() {
       proxycode_stop_locked || return
       ;;
   esac
-  if proxycode_port_in_use "$PROXYCODE_HTTP_PORT" || proxycode_port_in_use "$PROXYCODE_SOCKS_PORT"; then
+  if proxycode_port_in_use "$PROXYCODE_HTTP_PORT"; then
     proxycode_error 'a configured proxy port is already in use; refusing to replace an unknown listener'
     return
   fi

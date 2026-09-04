@@ -198,7 +198,7 @@ test_profile_import_default_and_show() {
   assert_eq $'Imported Tunnel Profile: work\nDefault Tunnel Profile: work' "$output" 'Profile import output'
   assert_eq 'work' "$("$cli" profile list)" 'Profile list output'
   assert_eq $'Name: work\nDefault: yes\nProbe: cloudflare\nExpected location: any' "$("$cli" profile show work)" 'Profile show output'
-  assert_eq $'HTTP port: 25345\nSOCKS port: 25344' "$("$cli" settings)" 'default listener settings'
+  assert_eq 'HTTP port: 25345' "$("$cli" settings)" 'default listener settings'
 
   local profile=$XDG_DATA_HOME/proxycode/profiles/work
   assert_eq "$source_hash" "$(/usr/bin/sha256sum "$source")" 'import leaves the source unchanged'
@@ -212,13 +212,13 @@ test_profile_import_default_and_show() {
   assert_mode "$profile/settings" 600
   assert_mode "$profile/proxy-credential" 600
   grep -q '^WGConfig = wireguard.conf$' "$profile/wireproxy.conf" || fail 'generated config uses the private copy'
-  grep -q '^BindAddress = 127.0.0.1:25344$' "$profile/wireproxy.conf" || fail 'SOCKS listener is loopback-only'
+  assert_eq 1 "$(grep -c '^\[' "$profile/wireproxy.conf")" 'generated config has one listener'
   grep -q '^BindAddress = 127.0.0.1:25345$' "$profile/wireproxy.conf" || fail 'HTTP listener is loopback-only'
   grep -q '^USERNAME=proxy-code$' "$profile/proxy-credential" || fail 'credential has the fixed username'
   password=$(sed -n 's/^PASSWORD=//p' "$profile/proxy-credential")
   [[ $password =~ ^[0-9a-f]{96}$ ]] || fail 'credential has a URL-safe generated password'
-  [[ $(grep -c '^Username = proxy-code$' "$profile/wireproxy.conf") == 2 ]] || fail 'both listeners use the fixed username'
-  [[ $(grep -c "^Password = $password$" "$profile/wireproxy.conf") == 2 ]] || fail 'both listeners use the stored password'
+  grep -q '^Username = proxy-code$' "$profile/wireproxy.conf" || fail 'HTTP listener uses the fixed username'
+  grep -q "^Password = $password$" "$profile/wireproxy.conf" || fail 'HTTP listener uses the stored password'
   [[ $output != *"$password"* ]] || fail 'import output exposes the credential'
 }
 
@@ -266,7 +266,7 @@ test_global_and_profile_settings() {
   TESTS=$((TESTS + 1))
   new_home
   install_custom_binary >/dev/null || { fail 'settings test install succeeds'; return; }
-  local cli=$HOME/.local/bin/proxycode source=$TEST_HOME/source/work.conf profile broken output status settings_before config_before travel_before
+  local cli=$HOME/.local/bin/proxycode source=$TEST_HOME/source/work.conf profile output status config_before
   write_wireguard_config "$source"
   "$cli" profile import "$source" --name work >/dev/null || { fail 'settings test import succeeds'; return; }
   profile=$XDG_DATA_HOME/proxycode/profiles/work
@@ -295,54 +295,17 @@ test_global_and_profile_settings() {
     assert_eq 2 "$status" "invalid custom probe URL status: $invalid_url"
   done
 
-  "$cli" profile import "$source" --name broken >/dev/null || { fail 'rollback setup import succeeds'; return; }
-  broken=$XDG_DATA_HOME/proxycode/profiles/broken
-  rm "$broken/proxy-credential"
-  settings_before=$(/usr/bin/sha256sum "$XDG_CONFIG_HOME/proxycode/settings")
   config_before=$(/usr/bin/sha256sum "$profile/wireproxy.conf")
-  output=$("$cli" settings --http-port 32080 --socks-port 32081 2>&1)
-  status=$?
-  assert_eq 1 "$status" 'failed Profile regeneration status'
-  [[ $output == *'could not prepare updated WireProxy configurations'* ]] || fail 'failed Profile regeneration is explained'
-  assert_eq "$settings_before" "$(/usr/bin/sha256sum "$XDG_CONFIG_HOME/proxycode/settings")" 'failed regeneration preserves global settings'
-  assert_eq "$config_before" "$(/usr/bin/sha256sum "$profile/wireproxy.conf")" 'failed regeneration preserves existing Profile configs'
-  rm -rf "$broken"
-
-  "$cli" profile import "$source" --name travel >/dev/null || { fail 'mid-commit rollback setup import succeeds'; return; }
-  mkdir -p "$TEST_HOME/failing-path"
-  cat >"$TEST_HOME/failing-path/mv" <<'EOF'
-#!/usr/bin/env bash
-target=${!#}
-[[ $target == */profiles/work/wireproxy.conf ]] && exit 1
-exec /usr/bin/mv "$@"
-EOF
-  chmod 700 "$TEST_HOME/failing-path/mv"
-  travel_before=$(/usr/bin/sha256sum "$XDG_DATA_HOME/proxycode/profiles/travel/wireproxy.conf")
-  output=$(PATH="$TEST_HOME/failing-path:$PATH" "$cli" settings --http-port 32080 --socks-port 32081 2>&1)
-  status=$?
-  assert_eq 1 "$status" 'mid-commit failure status'
-  [[ $output == *'could not update WireProxy configurations'* ]] || fail 'mid-commit failure is explained'
-  assert_eq "$settings_before" "$(/usr/bin/sha256sum "$XDG_CONFIG_HOME/proxycode/settings")" 'mid-commit failure preserves global settings'
-  assert_eq "$config_before" "$(/usr/bin/sha256sum "$profile/wireproxy.conf")" 'mid-commit failure restores committed Profile configs'
-  assert_eq "$travel_before" "$(/usr/bin/sha256sum "$XDG_DATA_HOME/proxycode/profiles/travel/wireproxy.conf")" 'mid-commit failure preserves uncommitted Profile configs'
-  ! compgen -G "$XDG_DATA_HOME/proxycode/profiles/*/wireproxy.conf.old.*" >/dev/null || fail 'mid-commit failure leaves redundant backups'
-  "$cli" profile remove travel --yes >/dev/null || { fail 'mid-commit rollback cleanup succeeds'; return; }
-
-  assert_eq $'HTTP port: 31080\nSOCKS port: 31081' "$("$cli" settings --http-port 31080 --socks-port 31081)" 'global port update'
-  grep -q '^BindAddress = 127.0.0.1:31080$' "$profile/wireproxy.conf" || fail 'HTTP port update regenerates Profile config'
-  grep -q '^BindAddress = 127.0.0.1:31081$' "$profile/wireproxy.conf" || fail 'SOCKS port update regenerates Profile config'
-  ! grep -q '_PORT=' "$profile/settings" || fail 'global ports are stored per Profile'
-  output=$("$cli" settings --http-port 31081 2>&1)
-  status=$?
-  assert_eq 2 "$status" 'duplicate listener port status'
-  [[ $output == *'must be distinct'* ]] || fail 'duplicate listener ports are explained'
+  assert_eq 'HTTP port: 31080' "$("$cli" settings --http-port 31080)" 'global port update'
+  assert_eq "$config_before" "$(/usr/bin/sha256sum "$profile/wireproxy.conf")" 'port update leaves derived Profile config for activation to regenerate'
+  ! grep -q '_PORT=' "$profile/settings" || fail 'Profile settings duplicate the global port'
   output=$("$cli" settings --http-port 65536 2>&1)
   status=$?
   assert_eq 2 "$status" 'out-of-range listener port status'
   output=$("$cli" settings --http-port 18446744073709551617 2>&1)
   status=$?
   assert_eq 2 "$status" 'overflowing listener port status'
-  assert_eq $'HTTP port: 31080\nSOCKS port: 31081' "$("$cli" settings)" 'invalid port update changes nothing'
+  assert_eq 'HTTP port: 31080' "$("$cli" settings)" 'invalid port update changes nothing'
 }
 
 test_profile_default_name_validation_and_removal() {
@@ -392,7 +355,7 @@ test_lifecycle_start_status_and_stop() {
   write_wireguard_config "$source"
   "$cli" profile import "$source" --name work --default >/dev/null || { fail 'lifecycle Profile import succeeds'; return; }
   "$cli" profile import "$source" --name travel >/dev/null || { fail 'second lifecycle Profile import succeeds'; return; }
-  "$cli" settings --http-port 31080 --socks-port 31081 >/dev/null || { fail 'lifecycle port setup succeeds'; return; }
+  "$cli" settings --http-port 31080 >/dev/null || { fail 'lifecycle port setup succeeds'; return; }
   profile=$XDG_DATA_HOME/proxycode/profiles/work
   printf 'stale generated config\n' >"$profile/wireproxy.conf"
 

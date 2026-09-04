@@ -21,7 +21,7 @@ The one Tunnel Profile whose WireProxy process is currently running. Linux v1 pe
 _Avoid_: Logged-in Profile, user session
 
 **Proxy credential**:
-A fixed, nonempty proxy username paired with a generated URL-safe password stored privately with one Tunnel Profile and used by its local HTTP and SOCKS listeners. It is proxy authentication material, not a provider login.
+A fixed, nonempty proxy username paired with a generated URL-safe password stored privately with one Tunnel Profile and used by its local HTTP listener. It is proxy authentication material, not a provider login.
 _Avoid_: Activation credential, Profile password, proxy login, provider password
 
 **Wrapped command**:
