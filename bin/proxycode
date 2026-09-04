@@ -19,6 +19,107 @@ case ${1:-} in
     (($# == 1)) || { printf 'proxycode version: unexpected arguments\n' >&2; exit 2; }
     printf 'proxycode %s\n' "$PROXYCODE_VERSION"
     ;;
+  profile)
+    shift
+    case ${1:-} in
+      list)
+        (($# == 1)) || { printf 'proxycode profile list: unexpected arguments\n' >&2; exit 2; }
+        proxycode_profile_list
+        ;;
+      show)
+        (($# == 2)) || { printf 'Usage: proxycode profile show NAME\n' >&2; exit 2; }
+        proxycode_profile_show "$2"
+        ;;
+      import)
+        (($# >= 2)) || { printf 'Usage: proxycode profile import FILE --name NAME [--default] [--replace] [--yes]\n' >&2; exit 2; }
+        source_file=$2
+        name=
+        make_default=false
+        replace=false
+        yes=false
+        shift 2
+        while (($#)); do
+          case $1 in
+            --name)
+              (($# >= 2)) || { printf 'proxycode profile import: --name requires a value\n' >&2; exit 2; }
+              name=$2
+              shift
+              ;;
+            --default) make_default=true ;;
+            --replace) replace=true ;;
+            --yes) yes=true ;;
+            *) printf "proxycode profile import: unknown option '%s'\n" "$1" >&2; exit 2 ;;
+          esac
+          shift
+        done
+        [[ -n $name ]] || { printf 'proxycode profile import: --name is required\n' >&2; exit 2; }
+        proxycode_profile_import "$source_file" "$name" "$make_default" "$replace" "$yes"
+        ;;
+      default)
+        (($# == 2)) || { printf 'Usage: proxycode profile default NAME\n' >&2; exit 2; }
+        proxycode_profile_default "$2"
+        ;;
+      remove)
+        (($# == 2 || $# == 3)) || { printf 'Usage: proxycode profile remove NAME [--yes]\n' >&2; exit 2; }
+        yes=false
+        if (($# == 3)); then
+          [[ $3 == --yes ]] || { printf "proxycode profile remove: unknown option '%s'\n" "$3" >&2; exit 2; }
+          yes=true
+        fi
+        proxycode_profile_remove "$2" "$yes"
+        ;;
+      settings)
+        (($# >= 2)) || { printf 'Usage: proxycode profile settings NAME [PROBE OPTIONS]\n' >&2; exit 2; }
+        name=$2
+        shift 2
+        if (($# == 0)); then
+          proxycode_profile_settings_show "$name"
+          exit
+        fi
+        probe= expectation= url= status= contains=
+        while (($#)); do
+          case $1 in
+            --probe|--expect-location|--url|--status|--contains)
+              (($# >= 2)) || { printf "proxycode profile settings: %s requires a value\n" "$1" >&2; exit 2; }
+              case $1 in
+                --probe) probe=$2 ;;
+                --expect-location) expectation=$2 ;;
+                --url) url=$2 ;;
+                --status) status=$2 ;;
+                --contains) contains=$2 ;;
+              esac
+              shift
+              ;;
+            *) printf "proxycode profile settings: unknown option '%s'\n" "$1" >&2; exit 2 ;;
+          esac
+          shift
+        done
+        [[ -n $probe ]] || { printf 'proxycode profile settings: --probe is required when changing settings\n' >&2; exit 2; }
+        proxycode_profile_settings_update "$name" "$probe" "$expectation" "$url" "$status" "$contains"
+        ;;
+      *) printf 'Usage: proxycode profile list|show|import|default|remove|settings ...\n' >&2; exit 2 ;;
+    esac
+    ;;
+  settings)
+    shift
+    if (($# == 0)); then
+      proxycode_settings_show
+      exit
+    fi
+    http_port= socks_port=
+    while (($#)); do
+      case $1 in
+        --http-port|--socks-port)
+          (($# >= 2)) || { printf "proxycode settings: %s requires a value\n" "$1" >&2; exit 2; }
+          [[ $1 == --http-port ]] && http_port=$2 || socks_port=$2
+          shift
+          ;;
+        *) printf "proxycode settings: unknown option '%s'\n" "$1" >&2; exit 2 ;;
+      esac
+      shift
+    done
+    proxycode_settings_update "$http_port" "$socks_port"
+    ;;
   '')
     printf 'proxycode: interactive management is not available yet\n' >&2
     printf 'Try: proxycode help\n' >&2
