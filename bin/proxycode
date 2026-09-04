@@ -19,6 +19,22 @@ case ${1:-} in
     (($# == 1)) || { printf 'proxycode version: unexpected arguments\n' >&2; exit 2; }
     printf 'proxycode %s\n' "$PROXYCODE_VERSION"
     ;;
+  start)
+    (($# <= 2)) || { printf 'Usage: proxycode start [NAME]\n' >&2; exit 2; }
+    proxycode_with_lifecycle_lock proxycode_start_locked "${2:-}"
+    ;;
+  stop)
+    (($# == 1)) || { printf 'Usage: proxycode stop\n' >&2; exit 2; }
+    proxycode_with_lifecycle_lock proxycode_stop_locked
+    ;;
+  status)
+    (($# == 1)) || { printf 'Usage: proxycode status\n' >&2; exit 2; }
+    proxycode_with_lifecycle_lock proxycode_status_locked
+    ;;
+  check)
+    (($# == 1)) || { printf 'Usage: proxycode check\n' >&2; exit 2; }
+    proxycode_with_lifecycle_lock proxycode_check_locked
+    ;;
   profile)
     shift
     case ${1:-} in

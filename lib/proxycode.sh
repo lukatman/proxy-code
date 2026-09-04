@@ -375,3 +375,379 @@ EOF
   $make_default && printf 'Default Tunnel Profile: %s\n' "$name"
   return 0
 }
+
+proxycode_prepare_lifecycle() {
+  proxycode_load_global_settings || return
+  mkdir -p "$PROXYCODE_RUNTIME_DIR" "$PROXYCODE_STATE_DIR/logs" || return 1
+  chmod 700 "$PROXYCODE_RUNTIME_DIR" "$PROXYCODE_STATE_DIR" "$PROXYCODE_STATE_DIR/logs" || return 1
+  : >"$PROXYCODE_RUNTIME_DIR/lifecycle.lock" || return 1
+  chmod 600 "$PROXYCODE_RUNTIME_DIR/lifecycle.lock"
+}
+
+proxycode_with_lifecycle_lock() {
+  local operation=$1
+  shift
+  proxycode_prepare_lifecycle || return
+  exec {PROXYCODE_LOCK_FD}>"$PROXYCODE_RUNTIME_DIR/lifecycle.lock" || return 1
+  flock -x "$PROXYCODE_LOCK_FD" || return 1
+  "$operation" "$@"
+}
+
+proxycode_process_start_time() {
+  local stat rest
+  [[ $1 =~ ^[0-9]+$ ]] || return 1
+  IFS= read -r stat <"/proc/$1/stat" 2>/dev/null || return 1
+  rest=${stat##*) }
+  set -- $rest
+  (($# >= 20)) || return 1
+  printf '%s' "${20}"
+}
+
+proxycode_process_state() {
+  local stat rest
+  [[ $1 =~ ^[0-9]+$ ]] || return 1
+  IFS= read -r stat <"/proc/$1/stat" 2>/dev/null || return 1
+  rest=${stat##*) }
+  set -- $rest
+  printf '%s' "$1"
+}
+
+proxycode_process_matches() {
+  local pid=$1 started=$2 executable=$3 config=$4 actual argument previous=
+  [[ $(proxycode_process_start_time "$pid") == "$started" ]] || return 1
+  actual=$(readlink -f "/proc/$pid/exe" 2>/dev/null) || return 1
+  [[ $actual == "$executable" ]] || return 1
+  while IFS= read -r -d '' argument; do
+    [[ $previous == --config && $argument == "$config" ]] && return 0
+    previous=$argument
+  done <"/proc/$pid/cmdline" 2>/dev/null
+  return 1
+}
+
+proxycode_wait_for_process_match() {
+  local attempt
+  for attempt in {1..10}; do
+    proxycode_process_matches "$@" && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+proxycode_inspect_active() {
+  local state=$PROXYCODE_RUNTIME_DIR/active expected_executable expected_config observed_start ready
+  PROXYCODE_ACTIVE_STATUS=stopped
+  PROXYCODE_ACTIVE_PROFILE= PROXYCODE_ACTIVE_PID= PROXYCODE_ACTIVE_STARTED=
+  [[ -e $state ]] || return 0
+  [[ -f $state && -r $state ]] || { PROXYCODE_ACTIVE_STATUS=ambiguous; return 0; }
+  expected_executable=$(readlink -f "$PROXYCODE_DATA_DIR/bin/wireproxy") || { PROXYCODE_ACTIVE_STATUS=ambiguous; return 0; }
+  PROXYCODE_ACTIVE_PROFILE=$(proxycode_read_setting "$state" PROFILE)
+  PROXYCODE_ACTIVE_PID=$(proxycode_read_setting "$state" PID)
+  PROXYCODE_ACTIVE_STARTED=$(proxycode_read_setting "$state" START_TIME)
+  ready=$(proxycode_read_setting "$state" READY)
+  if ! proxycode_validate_profile_name "$PROXYCODE_ACTIVE_PROFILE" ||
+    [[ ! $PROXYCODE_ACTIVE_PID =~ ^[0-9]+$ || ! $PROXYCODE_ACTIVE_STARTED =~ ^[0-9]+$ ]]; then
+    PROXYCODE_ACTIVE_STATUS=ambiguous
+    return 0
+  fi
+  expected_config=$(proxycode_profile_path "$PROXYCODE_ACTIVE_PROFILE" 2>/dev/null)/wireproxy.conf || {
+    PROXYCODE_ACTIVE_STATUS=ambiguous
+    return 0
+  }
+  if [[ ! -e /proc/$PROXYCODE_ACTIVE_PID || $(proxycode_process_state "$PROXYCODE_ACTIVE_PID") == Z ]]; then
+    rm -f -- "$state"
+    PROXYCODE_ACTIVE_PROFILE= PROXYCODE_ACTIVE_PID= PROXYCODE_ACTIVE_STARTED=
+    return 0
+  fi
+  if proxycode_process_matches "$PROXYCODE_ACTIVE_PID" "$PROXYCODE_ACTIVE_STARTED" "$expected_executable" "$expected_config"; then
+    [[ $ready == 1 ]] && PROXYCODE_ACTIVE_STATUS=active || PROXYCODE_ACTIVE_STATUS=starting
+  else
+    observed_start=$(proxycode_process_start_time "$PROXYCODE_ACTIVE_PID") || {
+      PROXYCODE_ACTIVE_STATUS=ambiguous
+      return 0
+    }
+    if [[ $observed_start == "$PROXYCODE_ACTIVE_STARTED" ]]; then
+      PROXYCODE_ACTIVE_STATUS=ambiguous
+      return 0
+    fi
+    rm -f -- "$state"
+    PROXYCODE_ACTIVE_PROFILE= PROXYCODE_ACTIVE_PID= PROXYCODE_ACTIVE_STARTED=
+  fi
+}
+
+proxycode_rotate_log() {
+  local name=$1 directory log size
+  [[ -n $name ]] || return 0
+  directory=$PROXYCODE_STATE_DIR/logs/$name
+  log=$directory/wireproxy.log
+  [[ -f $log ]] || return 0
+  size=$(stat -c %s "$log" 2>/dev/null) || return 1
+  if ((size >= 10485760)); then
+    cp -p -- "$log" "$directory/wireproxy.log.old" && : >"$log" || return 1
+    chmod 600 "$directory/wireproxy.log.old" "$log" || return 1
+  fi
+}
+
+proxycode_ambiguous_guidance() {
+  printf "Confirm no WireProxy process owns the configured ports, then remove '%s' and retry.\n" "$PROXYCODE_RUNTIME_DIR/active" >&2
+}
+
+proxycode_probe_once() {
+  local profile=$1 timeout_seconds=$2 probe expectation url expected_status contains body http_status curl_status location=
+  probe=$(proxycode_read_setting "$profile/settings" PROBE)
+  expectation=$(proxycode_read_setting "$profile/settings" EXPECT_LOCATION)
+  case $probe in
+    cloudflare) url=https://cloudflare.com/cdn-cgi/trace; expected_status=2xx ;;
+    mullvad) url=https://ipv4.am.i.mullvad.net/json; expected_status=2xx ;;
+    custom)
+      url=$(proxycode_read_setting "$profile/settings" URL)
+      expected_status=$(proxycode_read_setting "$profile/settings" STATUS)
+      contains=$(proxycode_read_setting "$profile/settings" CONTAINS)
+      ;;
+    *) return 1 ;;
+  esac
+  body=$(mktemp "$PROXYCODE_RUNTIME_DIR/probe.XXXXXX") || return 1
+  chmod 600 "$body" || { rm -f -- "$body"; return 1; }
+  if http_status=$(curl --disable --silent --max-filesize 65536 --max-time "$timeout_seconds" --output "$body" --write-out '%{http_code}' "$url" 2>/dev/null); then
+    :
+  else
+    curl_status=$?
+    rm -f -- "$body"
+    case $curl_status in
+      5|6|7|18|28|35|52|55|56|92) return 75 ;;
+      *) return 1 ;;
+    esac
+  fi
+  if [[ $expected_status == 2xx ]]; then
+    [[ $http_status =~ ^2[0-9][0-9]$ ]] || { rm -f -- "$body"; [[ $http_status == 408 || $http_status == 429 || $http_status == 5* ]] && return 75 || return 1; }
+  elif [[ $http_status != "$expected_status" ]]; then
+    rm -f -- "$body"
+    [[ $http_status == 408 || $http_status == 429 || $http_status == 5* ]] && return 75 || return 1
+  fi
+  case $probe in
+    cloudflare)
+      grep -q '^ip=.' "$body" || { rm -f -- "$body"; return 1; }
+      location=$(sed -n 's/^loc=//p' "$body" | sed -n '1p')
+      PROXYCODE_PROBE_LOCATION=$location
+      [[ -z $expectation || $location == "$expectation" ]] || { rm -f -- "$body"; return 1; }
+      ;;
+    mullvad)
+      grep -Eq '"mullvad_exit_ip"[[:space:]]*:[[:space:]]*true' "$body" || { rm -f -- "$body"; return 1; }
+      location=$(sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$body" | sed -n '1p')
+      PROXYCODE_PROBE_LOCATION=$location
+      [[ -z $expectation || $location == "$expectation" ]] || { rm -f -- "$body"; return 1; }
+      ;;
+    custom) [[ -z $contains ]] || grep -Fq -- "$contains" "$body" || { rm -f -- "$body"; return 1; } ;;
+  esac
+  rm -f -- "$body"
+  PROXYCODE_PROBE_LOCATION=$location
+}
+
+proxycode_run_probe() {
+  local profile=$1 total=$2 attempt=$3 retry=$4 started=$SECONDS status username password proxy_url remaining
+  username=$(proxycode_read_setting "$profile/proxy-credential" USERNAME) || return 1
+  password=$(proxycode_read_setting "$profile/proxy-credential" PASSWORD) || return 1
+  proxy_url=http://$username:$password@127.0.0.1:$PROXYCODE_HTTP_PORT
+  while :; do
+    remaining=$((total - (SECONDS - started)))
+    ((remaining > 0)) || return 1
+    ((attempt < remaining)) || attempt=$remaining
+    PROXYCODE_PROBE_LOCATION=
+    http_proxy=$proxy_url https_proxy=$proxy_url all_proxy=$proxy_url HTTP_PROXY=$proxy_url HTTPS_PROXY=$proxy_url ALL_PROXY=$proxy_url NO_PROXY= no_proxy= \
+      proxycode_probe_once "$profile" "$attempt"
+    status=$?
+    ((status == 0)) && return 0
+    [[ $retry == true ]] || return 1
+    ((status != 75 || SECONDS - started >= total - 1)) && return 1
+    sleep 1
+  done
+}
+
+proxycode_port_in_use() {
+  timeout 1 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$1' _ "$1" 2>/dev/null
+}
+
+proxycode_start_locked() {
+  local name=$1 profile config executable log_directory log pid started attempt
+  name=${name:-$PROXYCODE_DEFAULT_PROFILE}
+  [[ -n $name ]] || { proxycode_error 'no Tunnel Profile was selected and no Default is configured' 2; return; }
+  profile=$(proxycode_profile_path "$name") || { proxycode_error "invalid Tunnel Profile name '$name'" 2; return; }
+  [[ -d $profile ]] || { proxycode_error "Tunnel Profile '$name' does not exist" 2; return; }
+  proxycode_inspect_active || return
+  proxycode_rotate_log "$PROXYCODE_ACTIVE_PROFILE" || { proxycode_error 'could not rotate the WireProxy log'; return; }
+  case $PROXYCODE_ACTIVE_STATUS in
+    active)
+      [[ $PROXYCODE_ACTIVE_PROFILE == "$name" ]] && { printf 'Tunnel Profile already active: %s\n' "$name"; return; }
+      proxycode_error "Tunnel Profile '$PROXYCODE_ACTIVE_PROFILE' is active; stop it first"
+      return
+      ;;
+    ambiguous)
+      proxycode_error 'active process identity is ambiguous; refusing to start or signal it'
+      proxycode_ambiguous_guidance
+      return 1
+      ;;
+    starting)
+      proxycode_stop_locked || return
+      ;;
+  esac
+  if proxycode_port_in_use "$PROXYCODE_HTTP_PORT" || proxycode_port_in_use "$PROXYCODE_SOCKS_PORT"; then
+    proxycode_error 'a configured proxy port is already in use; refusing to replace an unknown listener'
+    return
+  fi
+  config=$profile/wireproxy.conf
+  proxycode_generate_wireproxy_config "$profile" "$config" || { proxycode_error 'could not regenerate the WireProxy configuration'; return; }
+  executable=$(readlink -f "$PROXYCODE_DATA_DIR/bin/wireproxy") || { proxycode_error 'installed WireProxy executable is missing'; return; }
+  "$executable" --config "$config" --configtest >/dev/null 2>&1 || { proxycode_error 'WireGuard configuration validation failed'; return; }
+  log_directory=$PROXYCODE_STATE_DIR/logs/$name
+  log=$log_directory/wireproxy.log
+  mkdir -p "$log_directory" || return 1
+  chmod 700 "$log_directory" || return 1
+  touch "$log" && chmod 600 "$log" || return 1
+  proxycode_rotate_log "$name" || { proxycode_error 'could not rotate the WireProxy log'; return; }
+  if ! proxycode_write_private "$PROXYCODE_RUNTIME_DIR/active" <<EOF
+PROFILE=$name
+PID=unavailable
+START_TIME=unavailable
+READY=0
+EOF
+  then
+    proxycode_error 'could not reserve active process state'
+    return
+  fi
+  (
+    cd "$profile" || exit
+    exec {PROXYCODE_LOCK_FD}>&-
+    exec nohup "$executable" --config "$config"
+  ) >>"$log" 2>&1 &
+  pid=$!
+  for attempt in {1..10}; do
+    started=$(proxycode_process_start_time "$pid") && break
+    sleep 0.1
+  done
+  if [[ -z ${started:-} ]]; then
+    [[ -e /proc/$pid ]] || rm -f -- "$PROXYCODE_RUNTIME_DIR/active"
+    proxycode_error 'WireProxy process identity could not be read; ambiguous state was retained if it may still be running'
+    return
+  fi
+  if ! proxycode_write_private "$PROXYCODE_RUNTIME_DIR/active" <<EOF
+PROFILE=$name
+PID=$pid
+START_TIME=$started
+READY=0
+EOF
+  then
+    if proxycode_wait_for_process_match "$pid" "$started" "$executable" "$config" &&
+      proxycode_terminate_verified "$pid" "$started" "$executable" "$config"; then
+      rm -f -- "$PROXYCODE_RUNTIME_DIR/active"
+    else
+      proxycode_error 'could not record or safely clean up the new WireProxy process; ambiguous state was retained'
+    fi
+    return 1
+  fi
+  if ! proxycode_wait_for_process_match "$pid" "$started" "$executable" "$config"; then
+    proxycode_error 'WireProxy process identity could not be verified; ambiguous state was retained'
+    return
+  fi
+  if ! proxycode_run_probe "$profile" 30 5 true; then
+    printf 'Location: %s\n' "${PROXYCODE_PROBE_LOCATION:-unavailable}"
+    if proxycode_terminate_verified "$pid" "$started" "$executable" "$config"; then
+      rm -f -- "$PROXYCODE_RUNTIME_DIR/active"
+      proxycode_error 'Tunnel Profile health check failed; WireProxy was stopped'
+    else
+      proxycode_error 'Tunnel Profile health check failed; cleanup could not be verified and active state was retained'
+    fi
+    printf "Run 'proxycode status', then retry 'proxycode start %s'.\n" "$name" >&2
+    return 1
+  fi
+  if ! proxycode_process_matches "$pid" "$started" "$executable" "$config"; then
+    proxycode_error 'WireProxy process identity changed after the health check; provisional state was retained'
+    return
+  fi
+  if ! proxycode_write_private "$PROXYCODE_RUNTIME_DIR/active" <<EOF
+PROFILE=$name
+PID=$pid
+START_TIME=$started
+READY=1
+EOF
+  then
+    if proxycode_terminate_verified "$pid" "$started" "$executable" "$config"; then
+      rm -f -- "$PROXYCODE_RUNTIME_DIR/active"
+    else
+      proxycode_error 'could not finalize activation; ambiguous state was retained'
+    fi
+    return 1
+  fi
+  printf 'Started Tunnel Profile: %s\nLocation: %s\n' "$name" "${PROXYCODE_PROBE_LOCATION:-unavailable}"
+}
+
+proxycode_wait_until_stopped() {
+  local pid=$1 deadline=$((SECONDS + $2))
+  while [[ -e /proc/$pid && $(proxycode_process_state "$pid") != Z ]]; do
+    ((SECONDS < deadline)) || return 1
+    sleep 0.1
+  done
+}
+
+proxycode_terminate_verified() {
+  local pid=$1 started=$2 executable=$3 config=$4
+  proxycode_process_matches "$pid" "$started" "$executable" "$config" || return 1
+  kill -TERM "$pid" 2>/dev/null || return 1
+  proxycode_wait_until_stopped "$pid" 5 && return 0
+  proxycode_process_matches "$pid" "$started" "$executable" "$config" || return 1
+  kill -KILL "$pid" 2>/dev/null || return 1
+  proxycode_wait_until_stopped "$pid" 2
+}
+
+proxycode_stop_locked() {
+  local pid started name config executable
+  proxycode_inspect_active || return
+  case $PROXYCODE_ACTIVE_STATUS in
+    stopped) printf 'Toolkit already stopped.\n'; return ;;
+    ambiguous)
+      proxycode_error 'active process identity is ambiguous; refusing to signal it'
+      proxycode_ambiguous_guidance
+      return 1
+      ;;
+  esac
+  pid=$PROXYCODE_ACTIVE_PID started=$PROXYCODE_ACTIVE_STARTED name=$PROXYCODE_ACTIVE_PROFILE
+  executable=$(readlink -f "$PROXYCODE_DATA_DIR/bin/wireproxy") || { proxycode_error 'installed WireProxy executable is missing'; return; }
+  config=$(proxycode_profile_path "$name")/wireproxy.conf
+  proxycode_rotate_log "$name" || { proxycode_error 'could not rotate the WireProxy log'; return; }
+  proxycode_terminate_verified "$pid" "$started" "$executable" "$config" || { proxycode_error 'WireProxy could not be stopped without risking another process'; return; }
+  rm -f -- "$PROXYCODE_RUNTIME_DIR/active" || return 1
+  printf 'Stopped Tunnel Profile: %s\n' "$name"
+}
+
+proxycode_status_locked() {
+  local profile profiles= active=none
+  proxycode_inspect_active || return
+  proxycode_rotate_log "$PROXYCODE_ACTIVE_PROFILE" || return
+  while IFS= read -r profile; do
+    [[ -n $profile ]] && profiles+=${profiles:+,\ }$profile
+  done < <(proxycode_profile_list)
+  [[ $PROXYCODE_ACTIVE_STATUS == active ]] && active=$PROXYCODE_ACTIVE_PROFILE
+  printf 'Default: %s\nActive: %s\nProfiles: %s\n' "${PROXYCODE_DEFAULT_PROFILE:-none}" "$active" "${profiles:-none}"
+  case $PROXYCODE_ACTIVE_STATUS in
+    active) printf 'Process: running (PID %s)\n' "$PROXYCODE_ACTIVE_PID" ;;
+    starting) printf 'Process: starting (PID %s)\n' "$PROXYCODE_ACTIVE_PID"; return 1 ;;
+    ambiguous)
+      printf 'Process: unknown (refusing to signal)\n'
+      proxycode_ambiguous_guidance
+      return 1
+      ;;
+    *) printf 'Process: stopped\n' ;;
+  esac
+}
+
+proxycode_check_locked() {
+  local profile
+  proxycode_inspect_active || return
+  [[ $PROXYCODE_ACTIVE_STATUS == active ]] || { proxycode_error 'no verified Tunnel Profile is active'; return; }
+  proxycode_rotate_log "$PROXYCODE_ACTIVE_PROFILE" || return
+  profile=$(proxycode_profile_path "$PROXYCODE_ACTIVE_PROFILE")
+  if ! proxycode_run_probe "$profile" 10 10 false; then
+    printf 'Location: %s\n' "${PROXYCODE_PROBE_LOCATION:-unavailable}"
+    proxycode_error 'Tunnel Profile health check failed'
+    return
+  fi
+  printf 'Tunnel Profile healthy: %s\nLocation: %s\n' "$PROXYCODE_ACTIVE_PROFILE" "${PROXYCODE_PROBE_LOCATION:-unavailable}"
+}
