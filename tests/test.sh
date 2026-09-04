@@ -197,7 +197,7 @@ test_global_and_profile_settings() {
   TESTS=$((TESTS + 1))
   new_home
   install_custom_binary >/dev/null || { fail 'settings test install succeeds'; return; }
-  local cli=$HOME/.local/bin/proxycode source=$TEST_HOME/source/work.conf profile broken output status settings_before config_before
+  local cli=$HOME/.local/bin/proxycode source=$TEST_HOME/source/work.conf profile broken output status settings_before config_before travel_before
   write_wireguard_config "$source"
   "$cli" profile import "$source" --name work >/dev/null || { fail 'settings test import succeeds'; return; }
   profile=$XDG_DATA_HOME/proxycode/profiles/work
@@ -234,9 +234,30 @@ test_global_and_profile_settings() {
   output=$("$cli" settings --http-port 32080 --socks-port 32081 2>&1)
   status=$?
   assert_eq 1 "$status" 'failed Profile regeneration status'
+  [[ $output == *'could not prepare updated WireProxy configurations'* ]] || fail 'failed Profile regeneration is explained'
   assert_eq "$settings_before" "$(/usr/bin/sha256sum "$XDG_CONFIG_HOME/proxycode/settings")" 'failed regeneration preserves global settings'
   assert_eq "$config_before" "$(/usr/bin/sha256sum "$profile/wireproxy.conf")" 'failed regeneration preserves existing Profile configs'
   rm -rf "$broken"
+
+  "$cli" profile import "$source" --name travel >/dev/null || { fail 'mid-commit rollback setup import succeeds'; return; }
+  mkdir -p "$TEST_HOME/failing-path"
+  cat >"$TEST_HOME/failing-path/mv" <<'EOF'
+#!/usr/bin/env bash
+target=${!#}
+[[ $target == */profiles/work/wireproxy.conf ]] && exit 1
+exec /usr/bin/mv "$@"
+EOF
+  chmod 700 "$TEST_HOME/failing-path/mv"
+  travel_before=$(/usr/bin/sha256sum "$XDG_DATA_HOME/proxycode/profiles/travel/wireproxy.conf")
+  output=$(PATH="$TEST_HOME/failing-path:$PATH" "$cli" settings --http-port 32080 --socks-port 32081 2>&1)
+  status=$?
+  assert_eq 1 "$status" 'mid-commit failure status'
+  [[ $output == *'could not update WireProxy configurations'* ]] || fail 'mid-commit failure is explained'
+  assert_eq "$settings_before" "$(/usr/bin/sha256sum "$XDG_CONFIG_HOME/proxycode/settings")" 'mid-commit failure preserves global settings'
+  assert_eq "$config_before" "$(/usr/bin/sha256sum "$profile/wireproxy.conf")" 'mid-commit failure restores committed Profile configs'
+  assert_eq "$travel_before" "$(/usr/bin/sha256sum "$XDG_DATA_HOME/proxycode/profiles/travel/wireproxy.conf")" 'mid-commit failure preserves uncommitted Profile configs'
+  ! compgen -G "$XDG_DATA_HOME/proxycode/profiles/*/wireproxy.conf.old.*" >/dev/null || fail 'mid-commit failure leaves redundant backups'
+  "$cli" profile remove travel --yes >/dev/null || { fail 'mid-commit rollback cleanup succeeds'; return; }
 
   assert_eq $'HTTP port: 31080\nSOCKS port: 31081' "$("$cli" settings --http-port 31080 --socks-port 31081)" 'global port update'
   grep -q '^BindAddress = 127.0.0.1:31080$' "$profile/wireproxy.conf" || fail 'HTTP port update regenerates Profile config'

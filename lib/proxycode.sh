@@ -153,7 +153,8 @@ proxycode_settings_update() {
   done
   if $failed; then
     rm -f -- "${staged_configs[@]}" "${backups[@]}" "$staged" "$backup"
-    return 1
+    proxycode_error 'could not prepare updated WireProxy configurations'
+    return
   fi
   for index in "${!profiles[@]}"; do
     if ! mv -f -- "${staged_configs[index]}" "${profiles[index]}/wireproxy.conf"; then
@@ -161,8 +162,10 @@ proxycode_settings_update() {
         mv -f -- "${backups[index]}" "${profiles[index]}/wireproxy.conf" ||
           proxycode_error 'could not restore a generated configuration; its private backup was retained'
       done
-      rm -f -- "${staged_configs[@]}"
-      return 1
+      rm -f -- "${staged_configs[@]}" "${backups[@]:committed}" ||
+        proxycode_error 'could not clean up redundant configuration backups'
+      proxycode_error 'could not update WireProxy configurations'
+      return
     fi
     committed=$((committed + 1))
   done
@@ -171,7 +174,8 @@ proxycode_settings_update() {
       mv -f -- "${backups[index]}" "${profiles[index]}/wireproxy.conf" ||
         proxycode_error 'could not restore a generated configuration; its private backup was retained'
     done
-    return 1
+    proxycode_error 'could not save global settings'
+    return
   fi
   rm -f -- "${backups[@]}"
   proxycode_settings_show
