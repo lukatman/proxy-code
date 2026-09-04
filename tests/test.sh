@@ -67,7 +67,18 @@ fake_wireproxy() {
 case \${1:-} in
   --version) printf 'wireproxy v${version}\\n' ;;
   --help) printf '%s\\n' 'Usage: wireproxy --config FILE [--configtest]' ;;
-  --config) [[ -n \${WIREPROXY_CONFIGTEST_FAIL:-} ]] && { printf 'PrivateKey = must-not-print\\n' >&2; exit 1; }; printf 'Config OK\\n' ;;
+  --config)
+    for argument in "\$@"; do
+      if [[ \$argument == --configtest ]]; then
+        [[ -n \${WIREPROXY_CONFIGTEST_FAIL:-} ]] && { printf 'PrivateKey = must-not-print\\n' >&2; exit 1; }
+        printf 'Config OK\\n'
+        exit
+      fi
+    done
+    [[ -n \${WIREPROXY_START_LOG:-} ]] && printf '%s\\n' "\$\$" >>"\$WIREPROXY_START_LOG"
+    trap 'exit 0' TERM INT
+    while :; do sleep 1; done
+    ;;
   *) exit 2 ;;
 esac
 EOF
@@ -93,6 +104,64 @@ AllowedIPs = 0.0.0.0/0
 # $(touch "$HOME/proxycode-must-not-evaluate-input")
 EOF
   chmod 600 "$1"
+}
+
+install_lifecycle_fakes() {
+  mkdir -p "$TEST_HOME/lifecycle-fakes"
+  cat >"$TEST_HOME/lifecycle-fakes/curl" <<'EOF'
+#!/usr/bin/env bash
+output=
+saw_limit=false
+for ((index = 1; index <= $#; index++)); do
+  if [[ ${!index} == --output ]]; then
+    next=$((index + 1))
+    output=${!next}
+  fi
+  if [[ ${!index} == --max-filesize ]]; then
+    next=$((index + 1))
+    [[ ${!next} == 65536 ]] && saw_limit=true
+  fi
+done
+[[ ${https_proxy:-} == "$EXPECTED_PROXY_URL" && ${HTTPS_PROXY:-} == "$EXPECTED_PROXY_URL" ]] || exit 90
+[[ -n $output ]] || exit 91
+$saw_limit || exit 92
+[[ -z ${FAKE_CURL_DELAY:-} ]] || sleep "$FAKE_CURL_DELAY"
+calls=0
+[[ -f $FAKE_CURL_CALLS ]] && calls=$(<"$FAKE_CURL_CALLS")
+calls=$((calls + 1))
+printf '%s\n' "$calls" >"$FAKE_CURL_CALLS"
+if ((calls <= ${FAKE_CURL_FAILS:-0})); then
+  exit "${FAKE_CURL_FAIL_EXIT:-7}"
+fi
+printf '%s' "${FAKE_CURL_BODY:-ip=203.0.113.1
+loc=SG
+}" >"$output"
+printf '%s' "${FAKE_CURL_STATUS:-200}"
+exit "${FAKE_CURL_EXIT:-0}"
+EOF
+  cat >"$TEST_HOME/lifecycle-fakes/readlink" <<'EOF'
+#!/usr/bin/env bash
+target=${!#}
+if [[ $target == /proc/*/exe ]]; then
+  if [[ -n ${FAKE_READLINK_EXE:-} ]]; then
+    printf '%s\n' "$FAKE_READLINK_EXE"
+  elif /usr/bin/grep -aFq "$EXPECTED_WIREPROXY_EXE" "${target%/exe}/cmdline"; then
+    printf '%s\n' "$EXPECTED_WIREPROXY_EXE"
+  else
+    exec /usr/bin/readlink "$@"
+  fi
+else
+  exec /usr/bin/readlink "$@"
+fi
+EOF
+  cat >"$TEST_HOME/lifecycle-fakes/timeout" <<'EOF'
+#!/usr/bin/env bash
+if [[ -n ${FAKE_PORT_BUSY:-} && ${1:-} == 1 && ${2:-} == bash ]]; then
+  exit 0
+fi
+exec /usr/bin/timeout "$@"
+EOF
+  chmod 700 "$TEST_HOME/lifecycle-fakes/"*
 }
 
 test_custom_install_and_cli() {
@@ -313,6 +382,246 @@ test_profile_default_name_validation_and_removal() {
   [[ -f $source ]] || fail 'Profile removal touches the source configuration'
 }
 
+test_lifecycle_start_status_and_stop() {
+  TESTS=$((TESTS + 1))
+  new_home
+  mkdir -p "$TEST_HOME/real-data"
+  ln -s "$TEST_HOME/real-data" "$XDG_DATA_HOME"
+  install_custom_binary >/dev/null || { fail 'lifecycle test install succeeds'; return; }
+  local cli=$HOME/.local/bin/proxycode source=$TEST_HOME/source/work.conf profile password output status pid calls fd log
+  write_wireguard_config "$source"
+  "$cli" profile import "$source" --name work --default >/dev/null || { fail 'lifecycle Profile import succeeds'; return; }
+  "$cli" profile import "$source" --name travel >/dev/null || { fail 'second lifecycle Profile import succeeds'; return; }
+  "$cli" settings --http-port 31080 --socks-port 31081 >/dev/null || { fail 'lifecycle port setup succeeds'; return; }
+  profile=$XDG_DATA_HOME/proxycode/profiles/work
+  printf 'stale generated config\n' >"$profile/wireproxy.conf"
+
+  install_lifecycle_fakes
+  EXPECTED_WIREPROXY_EXE=$(readlink -f "$XDG_DATA_HOME/proxycode/bin/wireproxy")
+  export EXPECTED_WIREPROXY_EXE
+  password=$(sed -n 's/^PASSWORD=//p' "$profile/proxy-credential")
+  export EXPECTED_PROXY_URL=http://proxy-code:$password@127.0.0.1:31080
+  export FAKE_CURL_CALLS=$TEST_HOME/curl-calls
+  export WIREPROXY_START_LOG=$TEST_HOME/wireproxy-starts
+  PATH=$TEST_HOME/lifecycle-fakes:$SYSTEM_PATH
+
+  output=$("$cli" start)
+  status=$?
+  assert_eq 0 "$status" 'Default Tunnel Profile starts'
+  assert_eq $'Started Tunnel Profile: work\nLocation: SG' "$output" 'start output'
+  grep -q '^BindAddress = 127.0.0.1:31080$' "$profile/wireproxy.conf" || fail 'start regenerates the HTTP listener from global settings'
+  assert_mode "$XDG_RUNTIME_DIR/proxycode" 700
+  assert_mode "$XDG_RUNTIME_DIR/proxycode/active" 600
+  assert_mode "$XDG_RUNTIME_DIR/proxycode/lifecycle.lock" 600
+  assert_mode "$XDG_STATE_HOME/proxycode/logs/work" 700
+  assert_mode "$XDG_STATE_HOME/proxycode/logs/work/wireproxy.log" 600
+  pid=$(sed -n 's/^PID=//p' "$XDG_RUNTIME_DIR/proxycode/active")
+  [[ $pid =~ ^[0-9]+$ && -d /proc/$pid ]] || fail 'start records a running process'
+  grep -q '^READY=1$' "$XDG_RUNTIME_DIR/proxycode/active" || fail 'successful activation marks state ready'
+  for fd in /proc/$pid/fd/*; do
+    [[ $(readlink "$fd" 2>/dev/null) != "$XDG_RUNTIME_DIR/proxycode/lifecycle.lock" ]] || fail 'WireProxy inherits the lifecycle lock'
+  done
+
+  output=$("$cli" status)
+  [[ $output == $'Default: work\nActive: work\nProfiles: travel, work\nProcess: running (PID '*')' ]] || fail 'status reports local lifecycle state'
+  calls=$(<"$FAKE_CURL_CALLS")
+  output=$("$cli" start work)
+  assert_eq 'Tunnel Profile already active: work' "$output" 'starting the Active Profile is idempotent'
+  assert_eq "$calls" "$(<"$FAKE_CURL_CALLS")" 'idempotent start does not repeat health'
+
+  sed -i 's/^READY=1$/READY=0/' "$XDG_RUNTIME_DIR/proxycode/active"
+  output=$("$cli" status 2>&1)
+  status=$?
+  assert_eq 1 "$status" 'incomplete activation status'
+  [[ $output == *$'Active: none\n'* && $output == *'Process: starting'* ]] || fail 'incomplete activation is reported without claiming Active'
+  output=$("$cli" start work)
+  assert_eq $'Stopped Tunnel Profile: work\nStarted Tunnel Profile: work\nLocation: SG' "$output" 'start recovers a verified incomplete activation'
+  [[ ! -e /proc/$pid ]] || fail 'incomplete activation recovery leaves the old process running'
+  pid=$(sed -n 's/^PID=//p' "$XDG_RUNTIME_DIR/proxycode/active")
+
+  export FAKE_READLINK_EXE=/usr/bin/not-wireproxy
+  output=$("$cli" stop 2>&1)
+  status=$?
+  assert_eq 1 "$status" 'wrong-executable stop refusal status'
+  [[ $output == *'identity is ambiguous'* && -e /proc/$pid ]] || fail 'wrong-executable state is not signaled'
+  unset FAKE_READLINK_EXE
+
+  calls=$(<"$FAKE_CURL_CALLS")
+  "$cli" profile settings work --probe cloudflare --expect-location SG >/dev/null
+  export FAKE_CURL_BODY=$'ip=203.0.113.1\nloc=US\n'
+  output=$("$cli" check 2>&1)
+  status=$?
+  assert_eq 1 "$status" 'explicit health failure status'
+  [[ $output == *'health check failed'* && $output == *'Location: US'* && $output != *'203.0.113.1'* ]] || fail 'location mismatch is safe and explained'
+  assert_eq "$((calls + 1))" "$(<"$FAKE_CURL_CALLS")" 'explicit check makes exactly one request'
+  [[ -e /proc/$pid && -e $XDG_RUNTIME_DIR/proxycode/active ]] || fail 'explicit health failure mutates lifecycle state'
+  unset FAKE_CURL_BODY
+
+  "$cli" profile settings work --probe mullvad --expect-location Singapore >/dev/null
+  export FAKE_CURL_BODY='{"mullvad_exit_ip": true, "country": "Singapore"}'
+  assert_eq $'Tunnel Profile healthy: work\nLocation: Singapore' "$("$cli" check)" 'Mullvad health contract'
+  "$cli" profile settings work --probe custom --url https://example.test/health --status 204 --contains ready >/dev/null
+  export FAKE_CURL_BODY='ready' FAKE_CURL_STATUS=204
+  assert_eq $'Tunnel Profile healthy: work\nLocation: unavailable' "$("$cli" check)" 'custom health contract'
+  unset FAKE_CURL_BODY FAKE_CURL_STATUS
+
+  log=$XDG_STATE_HOME/proxycode/logs/work/wireproxy.log
+  truncate -s 10485760 "$log"
+  "$cli" start work >/dev/null || fail 'idempotent start rotates an oversized log'
+  assert_eq 10485760 "$(stat -c %s "$log.old")" 'rotation keeps one complete backup'
+  assert_eq 0 "$(stat -c %s "$log")" 'rotation truncates the active log in place'
+  assert_mode "$log.old" 600
+
+  output=$("$cli" start travel 2>&1)
+  status=$?
+  assert_eq 1 "$status" 'start refuses to replace the Active Profile'
+  [[ $output == *"Tunnel Profile 'work' is active; stop it first"* ]] || fail 'different Active Profile refusal is actionable'
+  assert_eq 'Stopped Tunnel Profile: work' "$("$cli" stop)" 'stop output'
+  [[ ! -e $XDG_RUNTIME_DIR/proxycode/active ]] || fail 'stop clears active state'
+  [[ ! -e /proc/$pid ]] || fail 'stop terminates the managed process'
+  assert_eq $'Default: work\nActive: none\nProfiles: travel, work\nProcess: stopped' "$("$cli" status)" 'stopped status output'
+  assert_eq 'Toolkit already stopped.' "$("$cli" stop)" 'stop is idempotent'
+
+}
+
+test_lifecycle_failed_start_cleanup() {
+  TESTS=$((TESTS + 1))
+  new_home
+  install_custom_binary >/dev/null || { fail 'failed-start test install succeeds'; return; }
+  local cli=$HOME/.local/bin/proxycode source=$TEST_HOME/source/work.conf profile password output status pid
+  write_wireguard_config "$source"
+  "$cli" profile import "$source" --name work --default >/dev/null || { fail 'failed-start Profile import succeeds'; return; }
+  profile=$XDG_DATA_HOME/proxycode/profiles/work
+  install_lifecycle_fakes
+  EXPECTED_WIREPROXY_EXE=$(readlink -f "$XDG_DATA_HOME/proxycode/bin/wireproxy")
+  export EXPECTED_WIREPROXY_EXE
+  password=$(sed -n 's/^PASSWORD=//p' "$profile/proxy-credential")
+  export EXPECTED_PROXY_URL=http://proxy-code:$password@127.0.0.1:25345
+  export FAKE_CURL_CALLS=$TEST_HOME/curl-calls WIREPROXY_START_LOG=$TEST_HOME/wireproxy-starts
+  export FAKE_CURL_EXIT=60
+  PATH=$TEST_HOME/lifecycle-fakes:$SYSTEM_PATH
+
+  output=$("$cli" start 2>&1)
+  status=$?
+  assert_eq 1 "$status" 'failed activation status'
+  [[ $output == *'health check failed'* && $output == *'proxycode status'* && $output == *'proxycode start work'* ]] || fail 'failed activation is safe and actionable'
+  [[ ! -e $XDG_RUNTIME_DIR/proxycode/active ]] || fail 'failed activation leaves active state'
+  assert_eq 1 "$(<"$FAKE_CURL_CALLS")" 'permanent client failure is not retried'
+  pid=$(sed -n '1p' "$WIREPROXY_START_LOG")
+  for _ in {1..20}; do
+    [[ ! -e /proc/$pid ]] && break
+    sleep 0.1
+  done
+  [[ ! -e /proc/$pid ]] || fail 'failed activation leaves WireProxy running'
+  unset FAKE_CURL_EXIT
+
+  export FAKE_READLINK_EXE=/usr/bin/not-wireproxy
+  output=$("$cli" start 2>&1)
+  status=$?
+  assert_eq 1 "$status" 'unverified startup status'
+  [[ $output == *'ambiguous state was retained'* ]] || fail 'unverified startup explains retained state'
+  pid=$(sed -n '2p' "$WIREPROXY_START_LOG")
+  grep -q '^READY=0$' "$XDG_RUNTIME_DIR/proxycode/active" || fail 'unverified startup loses its provisional state'
+  output=$("$cli" status 2>&1)
+  status=$?
+  assert_eq 1 "$status" 'ambiguous status reports runtime failure'
+  [[ $output == *'Process: unknown'* && $output == *'Confirm no WireProxy process'* && -e /proc/$pid ]] || fail 'ambiguous status claims a trusted process or lacks recovery guidance'
+  unset FAKE_READLINK_EXE
+  kill -TERM "$pid"
+  for _ in {1..20}; do
+    [[ ! -e /proc/$pid ]] && break
+    sleep 0.1
+  done
+  "$cli" status >/dev/null || fail 'dead provisional state recovers'
+}
+
+test_lifecycle_stale_and_ambiguous_state() {
+  TESTS=$((TESTS + 1))
+  new_home
+  install_custom_binary >/dev/null || { fail 'state safety test install succeeds'; return; }
+  local cli=$HOME/.local/bin/proxycode source=$TEST_HOME/source/work.conf state output status stat rest shell_started
+  write_wireguard_config "$source"
+  "$cli" profile import "$source" --name work --default >/dev/null || { fail 'state safety Profile import succeeds'; return; }
+  install_lifecycle_fakes
+  EXPECTED_WIREPROXY_EXE=$(readlink -f "$XDG_DATA_HOME/proxycode/bin/wireproxy")
+  export EXPECTED_WIREPROXY_EXE
+  PATH=$TEST_HOME/lifecycle-fakes:$SYSTEM_PATH
+  "$cli" status >/dev/null
+  state=$XDG_RUNTIME_DIR/proxycode/active
+
+  printf 'PROFILE=work\nPID=999999999\nSTART_TIME=1\n' >"$state"
+  chmod 600 "$state"
+  output=$("$cli" status)
+  [[ $output == *$'Active: none\n'* && ! -e $state ]] || fail 'dead-PID stale state is recovered locally'
+
+  printf 'PROFILE=work\nPID=%s\nSTART_TIME=0\n' "$$" >"$state"
+  chmod 600 "$state"
+  output=$("$cli" status)
+  [[ $output == *$'Active: none\n'* && ! -e $state ]] || fail 'reused-PID stale state is recovered locally'
+
+  IFS= read -r stat <"/proc/$$/stat"
+  rest=${stat##*) }
+  set -- $rest
+  shell_started=${20}
+  printf 'PROFILE=work\nPID=%s\nSTART_TIME=%s\n' "$$" "$shell_started" >"$state"
+  chmod 600 "$state"
+  output=$("$cli" stop 2>&1)
+  status=$?
+  assert_eq 1 "$status" 'wrong-PID stop refusal status'
+  [[ $output == *'identity is ambiguous'* && $output == *"remove '$state'"* ]] || fail 'wrong-PID refusal lacks safe recovery guidance'
+  kill -0 $$ || fail 'wrong-PID refusal signals the unrelated process'
+  [[ -e $state ]] || fail 'ambiguous state is silently discarded'
+}
+
+test_lifecycle_lock_serializes_start() {
+  TESTS=$((TESTS + 1))
+  new_home
+  install_custom_binary >/dev/null || { fail 'locking test install succeeds'; return; }
+  local cli=$HOME/.local/bin/proxycode source=$TEST_HOME/source/work.conf profile password first second pid
+  write_wireguard_config "$source"
+  "$cli" profile import "$source" --name work --default >/dev/null || { fail 'locking Profile import succeeds'; return; }
+  profile=$XDG_DATA_HOME/proxycode/profiles/work
+  install_lifecycle_fakes
+  EXPECTED_WIREPROXY_EXE=$(readlink -f "$XDG_DATA_HOME/proxycode/bin/wireproxy")
+  export EXPECTED_WIREPROXY_EXE
+  password=$(sed -n 's/^PASSWORD=//p' "$profile/proxy-credential")
+  export EXPECTED_PROXY_URL=http://proxy-code:$password@127.0.0.1:25345
+  export FAKE_CURL_CALLS=$TEST_HOME/curl-calls WIREPROXY_START_LOG=$TEST_HOME/wireproxy-starts FAKE_CURL_DELAY=1 FAKE_CURL_FAILS=1
+  PATH=$TEST_HOME/lifecycle-fakes:$SYSTEM_PATH
+
+  "$cli" start >"$TEST_HOME/first.out" & first=$!
+  sleep 0.1
+  "$cli" start >"$TEST_HOME/second.out" & second=$!
+  wait "$first" || fail 'first serialized start succeeds'
+  wait "$second" || fail 'second serialized start succeeds idempotently'
+  assert_eq 1 "$(wc -l <"$WIREPROXY_START_LOG")" 'serialized starts launch one WireProxy process'
+  assert_eq 2 "$(<"$FAKE_CURL_CALLS")" 'transient activation failure retries once before success'
+  pid=$(sed -n 's/^PID=//p' "$XDG_RUNTIME_DIR/proxycode/active")
+  unset FAKE_CURL_DELAY FAKE_CURL_FAILS
+  "$cli" stop >/dev/null || { kill -TERM "$pid" 2>/dev/null; fail 'locking test cleanup succeeds'; }
+}
+
+test_lifecycle_unknown_listener_refusal() {
+  TESTS=$((TESTS + 1))
+  new_home
+  install_custom_binary >/dev/null || { fail 'listener test install succeeds'; return; }
+  local cli=$HOME/.local/bin/proxycode source=$TEST_HOME/source/work.conf output status
+  write_wireguard_config "$source"
+  "$cli" profile import "$source" --name work --default >/dev/null || { fail 'listener Profile import succeeds'; return; }
+  install_lifecycle_fakes
+  EXPECTED_WIREPROXY_EXE=$(readlink -f "$XDG_DATA_HOME/proxycode/bin/wireproxy")
+  export EXPECTED_WIREPROXY_EXE
+  export WIREPROXY_START_LOG=$TEST_HOME/wireproxy-starts FAKE_PORT_BUSY=1
+  PATH=$TEST_HOME/lifecycle-fakes:$SYSTEM_PATH
+
+  output=$("$cli" start 2>&1)
+  status=$?
+  assert_eq 1 "$status" 'unknown listener refusal status'
+  [[ $output == *'unknown listener'* ]] || fail 'unknown listener refusal is explained'
+  [[ ! -e $WIREPROXY_START_LOG && ! -e $XDG_RUNTIME_DIR/proxycode/active ]] || fail 'unknown listener is adopted or replaced'
+  unset FAKE_PORT_BUSY
+}
+
 make_release_fakes() {
   local arch=$1 digest_mode=${2:-valid}
   mkdir -p "$TEST_HOME/fakes"
@@ -455,6 +764,11 @@ test_profile_import_default_and_show
 test_profile_replacement_and_validation_rollback
 test_global_and_profile_settings
 test_profile_default_name_validation_and_removal
+test_lifecycle_start_status_and_stop
+test_lifecycle_failed_start_cleanup
+test_lifecycle_stale_and_ambiguous_state
+test_lifecycle_lock_serializes_start
+test_lifecycle_unknown_listener_refusal
 test_pinned_architectures
 test_verification_failure_preserves_installation
 test_commit_failure_rolls_back
