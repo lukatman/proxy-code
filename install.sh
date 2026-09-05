@@ -16,33 +16,60 @@ die() {
 
 usage() {
   cat <<'EOF'
-Usage: ./install.sh --install-only [--wireproxy-bin FILE]
+Usage:
+  ./install.sh --install-only [--wireproxy-bin FILE]
+  ./install.sh --uninstall [--yes]
+  ./install.sh --purge [--yes]
 EOF
 }
 
-install_only=false
+version_is_newer() {
+  local left_major left_minor left_patch right_major right_minor right_patch
+  IFS=. read -r left_major left_minor left_patch <<<"$1"
+  IFS=. read -r right_major right_minor right_patch <<<"$2"
+  ((10#$left_major > 10#$right_major ||
+    (10#$left_major == 10#$right_major && 10#$left_minor > 10#$right_minor) ||
+    (10#$left_major == 10#$right_major && 10#$left_minor == 10#$right_minor && 10#$left_patch > 10#$right_patch)))
+}
+
+mode=
 custom_binary=
+yes=false
 while (($#)); do
   case $1 in
-    --install-only) install_only=true ;;
+    --install-only|--uninstall|--purge)
+      [[ -z $mode ]] || die 'choose exactly one of --install-only, --uninstall, or --purge' 2
+      mode=${1#--}
+      ;;
     --wireproxy-bin)
       (($# >= 2)) || die '--wireproxy-bin requires a file' 2
       custom_binary=$2
       shift
       ;;
+    --yes) yes=true ;;
     --help|-h) usage; exit 0 ;;
     *) die "unknown option '$1'" 2 ;;
   esac
   shift
 done
-$install_only || die 'this release requires --install-only' 2
+[[ -n $mode ]] || die 'this release requires --install-only, --uninstall, or --purge' 2
+if [[ $mode == install-only ]]; then
+  $yes && die '--yes is only valid with --uninstall or --purge' 2
+else
+  [[ -z $custom_binary ]] || die '--wireproxy-bin is only valid with --install-only' 2
+fi
 
 if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
   die 'Bash 4.4 or newer is required'
 fi
 
 missing=()
-for command_name in curl flock tar sha256sum timeout mktemp readlink stat nohup awk grep sed; do
+if [[ $mode == install-only ]]; then
+  required_commands=(curl flock tar sha256sum timeout mktemp readlink stat nohup awk grep sed)
+else
+  required_commands=(flock readlink stat awk)
+fi
+for command_name in "${required_commands[@]}"; do
   command -v "$command_name" >/dev/null 2>&1 || missing+=("$command_name")
 done
 ((${#missing[@]} == 0)) || die "missing required commands: ${missing[*]}. Install them with your distribution package manager."
@@ -53,6 +80,53 @@ source_root=${script_path%/*}
 # shellcheck source=lib/proxycode.sh
 source "$source_root/lib/proxycode.sh"
 proxycode_init_paths || exit 1
+
+acquire_lifecycle_lock() {
+  mkdir -p "${PROXYCODE_RUNTIME_DIR%/*}" || die 'cannot create the lifecycle lock directory'
+  exec {INSTALL_LOCK_FD}<"${PROXYCODE_RUNTIME_DIR%/*}" || die 'cannot open the lifecycle lock'
+  flock -x "$INSTALL_LOCK_FD" || die 'cannot acquire the lifecycle lock'
+  if [[ -e $PROXYCODE_RUNTIME_DIR/lifecycle.lock || -e $PROXYCODE_BIN_DIR/proxycode || -e $PROXYCODE_DATA_DIR/lib/proxycode.sh ]]; then
+    mkdir -p "$PROXYCODE_RUNTIME_DIR" || die 'cannot create the lifecycle directory'
+    chmod 700 "$PROXYCODE_RUNTIME_DIR" || die 'cannot secure the lifecycle directory'
+    exec {INSTALL_LEGACY_LOCK_FD}>"$PROXYCODE_RUNTIME_DIR/lifecycle.lock" || die 'cannot open the legacy lifecycle lock'
+    chmod 600 "$PROXYCODE_RUNTIME_DIR/lifecycle.lock" || die 'cannot secure the legacy lifecycle lock'
+    flock -x "$INSTALL_LEGACY_LOCK_FD" || die 'cannot acquire the legacy lifecycle lock'
+  fi
+}
+
+if [[ $mode != install-only ]]; then
+  acquire_lifecycle_lock
+  proxycode_inspect_active || die 'cannot inspect lifecycle state'
+  if [[ $PROXYCODE_ACTIVE_STATUS == ambiguous ]]; then
+    proxycode_ambiguous_guidance
+    die 'active process identity is ambiguous; refusing maintenance'
+  fi
+
+  if [[ $mode == purge ]]; then
+    profiles=()
+    for profile in "$PROXYCODE_DATA_DIR"/profiles/*; do
+      [[ -d $profile ]] && profiles+=("${profile##*/}")
+    done
+    printf 'Tunnel Profiles to purge: %s\n' "${profiles[*]:-none}"
+    proxycode_confirm "$yes" 'Purge all Toolkit data?' || exit
+  else
+    proxycode_confirm "$yes" 'Uninstall the Toolkit?' || exit
+  fi
+
+  [[ $PROXYCODE_ACTIVE_STATUS == stopped ]] || proxycode_stop_locked || die 'could not safely stop the Active Tunnel Profile'
+  rm -f -- "$PROXYCODE_BIN_DIR/proxycode" || die 'could not remove the Toolkit command'
+  if [[ $mode == purge ]]; then
+    rm -rf -- "$PROXYCODE_CONFIG_DIR" "$PROXYCODE_DATA_DIR" "$PROXYCODE_STATE_DIR" "$PROXYCODE_RUNTIME_DIR" || die 'could not purge Toolkit data'
+  else
+    rm -rf -- "$PROXYCODE_DATA_DIR/bin" "$PROXYCODE_DATA_DIR/lib" "$PROXYCODE_DATA_DIR/licenses" "$PROXYCODE_STATE_DIR" "$PROXYCODE_RUNTIME_DIR" || die 'could not remove installed Toolkit files'
+  fi
+  if [[ $mode == purge ]]; then
+    printf 'Purged the Toolkit.\n'
+  else
+    printf 'Uninstalled the Toolkit; Tunnel Profiles, Proxy credentials, and settings were preserved.\n'
+  fi
+  exit 0
+fi
 
 os=$(uname -s)
 machine=$(uname -m)
@@ -162,6 +236,39 @@ EOF
 chmod 700 "$work_dir/payload/proxycode"
 chmod 600 "$work_dir/payload/proxycode.sh" "$work_dir/payload/wireproxy.LICENSE" "$work_dir/payload/install"
 bash -n "$work_dir/payload/proxycode" "$work_dir/payload/proxycode.sh" || die 'staged Toolkit validation failed'
+
+acquire_lifecycle_lock
+installation_present=false
+installation_complete=true
+for installed_path in "$PROXYCODE_BIN_DIR/proxycode" "$PROXYCODE_DATA_DIR/bin/wireproxy" "$PROXYCODE_DATA_DIR/lib/proxycode.sh" "$PROXYCODE_DATA_DIR/licenses/wireproxy.LICENSE" "$PROXYCODE_STATE_DIR/install"; do
+  [[ -e $installed_path ]] && installation_present=true
+  [[ -e $installed_path ]] || installation_complete=false
+done
+proxycode_inspect_active || die 'cannot inspect lifecycle state'
+case $PROXYCODE_ACTIVE_STATUS in
+  active|starting) die "Tunnel Profile '$PROXYCODE_ACTIVE_PROFILE' is active; run 'proxycode stop' before reinstalling" ;;
+  ambiguous)
+    proxycode_ambiguous_guidance
+    die 'active process identity is ambiguous; refusing to reinstall'
+    ;;
+esac
+
+if $installation_present; then
+  current_toolkit_version= current_wireproxy_version= current_wireproxy_digest= current_wireproxy_source=
+  if [[ -r $PROXYCODE_STATE_DIR/install ]]; then
+    current_toolkit_version=$(proxycode_read_setting "$PROXYCODE_STATE_DIR/install" PROXYCODE_VERSION)
+    current_wireproxy_version=$(proxycode_read_setting "$PROXYCODE_STATE_DIR/install" WIREPROXY_VERSION)
+    current_wireproxy_digest=$(proxycode_read_setting "$PROXYCODE_STATE_DIR/install" WIREPROXY_SHA256)
+    current_wireproxy_source=$(proxycode_read_setting "$PROXYCODE_STATE_DIR/install" WIREPROXY_SOURCE)
+  fi
+  if [[ $current_toolkit_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && version_is_newer "$current_toolkit_version" "$PROXYCODE_VERSION"; then
+    die "installed Toolkit has newer Toolkit version $current_toolkit_version; refusing to downgrade to $PROXYCODE_VERSION"
+  fi
+  if ! $installation_complete ||
+    [[ ! $current_toolkit_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! $current_wireproxy_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! $current_wireproxy_digest =~ ^[0-9a-f]{64}$ || ! $current_wireproxy_source =~ ^(pinned|custom)$ ]]; then
+    printf 'Detected an incomplete installation; repairing it. If interrupted, rerun this fixed-version installer.\n'
+  fi
+fi
 
 directories=(
   "$PROXYCODE_BIN_DIR"

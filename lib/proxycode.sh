@@ -3,6 +3,7 @@
 PROXYCODE_VERSION=1.0.0
 
 proxycode_init_paths() {
+  local home_root config_root data_root state_root runtime_root
   if [[ ${HOME:-} != /* || $HOME == / ]]; then
     printf 'proxycode: HOME must be an absolute user directory\n' >&2
     return 1
@@ -17,6 +18,31 @@ proxycode_init_paths() {
   else
     PROXYCODE_RUNTIME_DIR=$PROXYCODE_STATE_DIR
   fi
+
+  home_root=$(readlink -m "$HOME") || return 1
+  config_root=$(readlink -m "$PROXYCODE_CONFIG_DIR") || return 1
+  data_root=$(readlink -m "$PROXYCODE_DATA_DIR") || return 1
+  state_root=$(readlink -m "$PROXYCODE_STATE_DIR") || return 1
+  runtime_root=$(readlink -m "$PROXYCODE_RUNTIME_DIR") || return 1
+  case "$home_root/" in
+    "$config_root/"*|"$data_root/"*|"$state_root/"*|"$runtime_root/"*)
+      proxycode_error 'an XDG Toolkit directory cannot contain HOME; use non-overlapping XDG paths'
+      return
+      ;;
+  esac
+  if proxycode_paths_overlap "$config_root" "$data_root" ||
+    proxycode_paths_overlap "$config_root" "$state_root" ||
+    proxycode_paths_overlap "$config_root" "$runtime_root" ||
+    proxycode_paths_overlap "$data_root" "$state_root" ||
+    proxycode_paths_overlap "$data_root" "$runtime_root" ||
+    { [[ $state_root != "$runtime_root" ]] && proxycode_paths_overlap "$state_root" "$runtime_root"; }; then
+    proxycode_error 'XDG Toolkit directories overlap; use separate config, data, state, and runtime paths'
+    return
+  fi
+}
+
+proxycode_paths_overlap() {
+  [[ $1 == "$2" || $1 == "$2"/* || $2 == "$1"/* ]]
 }
 
 proxycode_xdg_path() {
@@ -229,6 +255,16 @@ Password = $password
 EOF
 }
 
+proxycode_verified_wireproxy() {
+  local executable expected actual
+  executable=$(readlink -f "$PROXYCODE_DATA_DIR/bin/wireproxy") || { proxycode_error 'installed WireProxy executable is missing; rerun the installer'; return; }
+  expected=$(proxycode_read_setting "$PROXYCODE_STATE_DIR/install" WIREPROXY_SHA256 2>/dev/null)
+  actual=$(sha256sum "$executable" 2>/dev/null) || { proxycode_error 'installed WireProxy could not be verified; rerun the installer'; return; }
+  actual=${actual%% *}
+  [[ $expected =~ ^[0-9a-f]{64}$ && $actual == "$expected" ]] || { proxycode_error 'installed WireProxy does not match installation metadata; rerun the installer'; return; }
+  printf '%s' "$executable"
+}
+
 proxycode_confirm() {
   local yes=$1 prompt=$2 answer
   $yes && return
@@ -274,10 +310,21 @@ proxycode_profile_remove() {
 }
 
 proxycode_profile_import() {
-  local source_file=$1 name=$2 make_default=$3 replace=$4 yes=$5 profile stage password backup existed=false
+  local source_file=$1 name=$2 make_default=$3 replace=$4 yes=$5 profile stage password backup config_root data_root state_root runtime_root existed=false
   proxycode_load_global_settings || return
   profile=$(proxycode_profile_path "$name") || { proxycode_error "invalid Tunnel Profile name '$name'" 2; return; }
   [[ -f $source_file && -r $source_file ]] || { proxycode_error "cannot read WireGuard configuration '$source_file'" 2; return; }
+  source_file=$(readlink -f "$source_file") || { proxycode_error 'cannot resolve the WireGuard configuration' 2; return; }
+  config_root=$(readlink -f "$PROXYCODE_CONFIG_DIR") || return 1
+  data_root=$(readlink -f "$PROXYCODE_DATA_DIR") || return 1
+  state_root=$(readlink -f "$PROXYCODE_STATE_DIR") || return 1
+  runtime_root=$(readlink -f "$PROXYCODE_RUNTIME_DIR") || return 1
+  case $source_file in
+    "$config_root"|"$config_root"/*|"$data_root"|"$data_root"/*|"$state_root"|"$state_root"/*|"$runtime_root"|"$runtime_root"/*)
+      proxycode_error 'the original WireGuard configuration must be outside Toolkit-managed directories' 2
+      return
+      ;;
+  esac
   if [[ -e $profile ]]; then
     $replace || { proxycode_error "Tunnel Profile '$name' already exists; use --replace" 2; return; }
     proxycode_confirm "$yes" "Replace Tunnel Profile '$name'?" || return
@@ -352,23 +399,35 @@ proxycode_prepare_lifecycle() {
   proxycode_load_global_settings || return
   mkdir -p "$PROXYCODE_RUNTIME_DIR" "$PROXYCODE_STATE_DIR/logs" || return 1
   chmod 700 "$PROXYCODE_RUNTIME_DIR" "$PROXYCODE_STATE_DIR" "$PROXYCODE_STATE_DIR/logs" || return 1
-  : >"$PROXYCODE_RUNTIME_DIR/lifecycle.lock" || return 1
-  chmod 600 "$PROXYCODE_RUNTIME_DIR/lifecycle.lock"
 }
 
 proxycode_with_lifecycle_lock() {
   local operation=$1
   shift
-  proxycode_prepare_lifecycle || return
-  exec {PROXYCODE_LOCK_FD}>"$PROXYCODE_RUNTIME_DIR/lifecycle.lock" || return 1
+  proxycode_init_paths || return
+  mkdir -p "${PROXYCODE_RUNTIME_DIR%/*}" || return 1
+  exec {PROXYCODE_LOCK_FD}<"${PROXYCODE_RUNTIME_DIR%/*}" || return 1
   flock -x "$PROXYCODE_LOCK_FD" || return 1
+  [[ -x $PROXYCODE_BIN_DIR/proxycode && -r $PROXYCODE_DATA_DIR/lib/proxycode.sh && -r $PROXYCODE_STATE_DIR/install ]] || {
+    proxycode_error 'Toolkit installation changed while waiting; rerun the installer'
+    return
+  }
+  mkdir -p "$PROXYCODE_RUNTIME_DIR" || return 1
+  exec {PROXYCODE_LEGACY_LOCK_FD}>"$PROXYCODE_RUNTIME_DIR/lifecycle.lock" || return 1
+  chmod 600 "$PROXYCODE_RUNTIME_DIR/lifecycle.lock" || return 1
+  flock -x "$PROXYCODE_LEGACY_LOCK_FD" || return 1
+  [[ -x $PROXYCODE_BIN_DIR/proxycode && -r $PROXYCODE_DATA_DIR/lib/proxycode.sh && -r $PROXYCODE_STATE_DIR/install ]] || {
+    proxycode_error 'Toolkit installation changed while waiting; rerun the installer'
+    return
+  }
+  proxycode_prepare_lifecycle || return
   "$operation" "$@"
 }
 
 proxycode_process_start_time() {
   local stat rest
   [[ $1 =~ ^[0-9]+$ ]] || return 1
-  IFS= read -r stat <"/proc/$1/stat" 2>/dev/null || return 1
+  IFS= read -r stat 2>/dev/null <"/proc/$1/stat" || return 1
   rest=${stat##*) }
   set -- $rest
   (($# >= 20)) || return 1
@@ -378,7 +437,7 @@ proxycode_process_start_time() {
 proxycode_process_state() {
   local stat rest
   [[ $1 =~ ^[0-9]+$ ]] || return 1
-  IFS= read -r stat <"/proc/$1/stat" 2>/dev/null || return 1
+  IFS= read -r stat 2>/dev/null <"/proc/$1/stat" || return 1
   rest=${stat##*) }
   set -- $rest
   printf '%s' "$1"
@@ -544,6 +603,7 @@ proxycode_start_locked() {
   [[ -n $name ]] || { proxycode_error 'no Tunnel Profile was selected and no Default is configured' 2; return; }
   profile=$(proxycode_profile_path "$name") || { proxycode_error "invalid Tunnel Profile name '$name'" 2; return; }
   [[ -d $profile ]] || { proxycode_error "Tunnel Profile '$name' does not exist" 2; return; }
+  executable=$(proxycode_verified_wireproxy) || return
   proxycode_inspect_active || return
   proxycode_rotate_log "$PROXYCODE_ACTIVE_PROFILE" || { proxycode_error 'could not rotate the WireProxy log'; return; }
   case $PROXYCODE_ACTIVE_STATUS in
@@ -567,7 +627,6 @@ proxycode_start_locked() {
   fi
   config=$profile/wireproxy.conf
   proxycode_generate_wireproxy_config "$profile" "$config" || { proxycode_error 'could not regenerate the WireProxy configuration'; return; }
-  executable=$(readlink -f "$PROXYCODE_DATA_DIR/bin/wireproxy") || { proxycode_error 'installed WireProxy executable is missing'; return; }
   "$executable" --config "$config" --configtest >/dev/null 2>&1 || { proxycode_error 'WireGuard configuration validation failed'; return; }
   log_directory=$PROXYCODE_STATE_DIR/logs/$name
   log=$log_directory/wireproxy.log
@@ -588,6 +647,7 @@ EOF
   (
     cd "$profile" || exit
     exec {PROXYCODE_LOCK_FD}>&-
+    exec {PROXYCODE_LEGACY_LOCK_FD}>&-
     exec nohup "$executable" --config "$config"
   ) >>"$log" 2>&1 &
   pid=$!
