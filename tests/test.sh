@@ -382,6 +382,7 @@ test_lifecycle_start_status_and_stop() {
   grep -q '^READY=1$' "$XDG_RUNTIME_DIR/proxycode/active" || fail 'successful activation marks state ready'
   for fd in /proc/$pid/fd/*; do
     [[ $(readlink "$fd" 2>/dev/null) != "$XDG_RUNTIME_DIR" ]] || fail 'WireProxy inherits the lifecycle lock'
+    [[ $(readlink "$fd" 2>/dev/null) != "$XDG_RUNTIME_DIR/proxycode/lifecycle.lock" ]] || fail 'WireProxy inherits the legacy lifecycle lock'
   done
 
   output=$("$cli" status)
@@ -611,6 +612,7 @@ IFS= read -r input
 printf '%s\n' "$input" >"$WRAPPED_STDIN_LOG"
 for fd in /proc/$$/fd/*; do
   [[ $(readlink "$fd" 2>/dev/null) != "$XDG_RUNTIME_DIR" ]] || exit 98
+  [[ $(readlink "$fd" 2>/dev/null) != "$XDG_RUNTIME_DIR/proxycode/lifecycle.lock" ]] || exit 98
 done
 printf 'wrapped stdout\n'
 printf 'wrapped stderr\n' >&2
@@ -1043,45 +1045,19 @@ test_maintenance_process_safety_and_binary_drift() {
   [[ ! -e $WIREPROXY_START_LOG && ! -e $state ]] || { pid=$(sed -n '1p' "$WIREPROXY_START_LOG"); kill -TERM "$pid" 2>/dev/null; fail 'drifted WireProxy is launched'; }
 }
 
-test_maintenance_with_overlapping_roots_and_reduced_dependencies() {
+test_overlapping_roots_refuse_changes() {
   TESTS=$((TESTS + 1))
   new_home
   export XDG_CONFIG_HOME=$TEST_HOME/shared XDG_DATA_HOME=$TEST_HOME/shared XDG_STATE_HOME=$TEST_HOME/shared XDG_RUNTIME_DIR=$TEST_HOME/shared
-  install_custom_binary >/dev/null || { fail 'overlapping-root baseline succeeds'; return; }
-  local cli=$HOME/.local/bin/proxycode root=$TEST_HOME/shared/proxycode source=$TEST_HOME/original-wireguard.conf managed_source restricted output status
-  write_wireguard_config "$source"
-  "$cli" profile import "$source" --name work --default >/dev/null || { fail 'overlapping-root Profile import succeeds'; return; }
-  managed_source=$root/original-wireguard.conf
-  write_wireguard_config "$managed_source"
-  output=$("$cli" profile import "$managed_source" --name rejected 2>&1)
-  status=$?
-  assert_eq 2 "$status" 'managed-root source rejection status'
-  [[ $output == *'must be outside Toolkit-managed directories'* ]] || fail 'managed-root source rejection is unclear'
-
-  restricted=$TEST_HOME/removal-path
-  mkdir -p "$restricted"
-  for command_name in flock readlink stat awk mkdir chmod rm rmdir; do
-    ln -s "$(command -v "$command_name")" "$restricted/$command_name"
-  done
-  PATH=$restricted /usr/bin/bash "$ROOT/install.sh" --uninstall --yes >/dev/null || { fail 'uninstall works without install-only dependencies'; return; }
-  [[ -f $source && -f $managed_source && -f $root/settings && -f $root/profiles/work/proxy-credential ]] || fail 'overlapping-root uninstall deletes preserved data'
-  [[ ! -e $root/bin && ! -e $root/lib && ! -e $root/licenses && ! -e $root/logs && ! -e $root/install && ! -e $root/active ]] || fail 'overlapping-root uninstall leaves owned installed or runtime data'
-
-  PATH=$SYSTEM_PATH
-  bash "$ROOT/install.sh" --install-only --wireproxy-bin "$TEST_HOME/custom/wireproxy" >/dev/null || { fail 'overlapping-root reinstall succeeds'; return; }
-  bash "$ROOT/install.sh" --purge --yes >/dev/null || { fail 'overlapping-root purge succeeds'; return; }
-  [[ -f $source && -f $managed_source ]] || fail 'purge deletes an original WireGuard source'
-  [[ ! -e $root/settings && ! -e $root/profiles && ! -e $root/bin && ! -e $root/lib && ! -e $root/licenses && ! -e $root/logs && ! -e $root/install && ! -e $root/active && ! -e $root/lifecycle.lock ]] || fail 'overlapping-root purge leaves Toolkit-owned data'
-
-  new_home
+  local profile=$TEST_HOME/shared/proxycode/profiles/work output status
+  mkdir -p "$profile"
+  printf 'preserve me\n' >"$profile/wireguard.conf"
   fake_wireproxy "$TEST_HOME/custom/wireproxy"
-  mkdir -p "$XDG_RUNTIME_DIR/proxycode"
-  printf 'PROFILE=work\nPID=%s\nSTART_TIME=1\nREADY=1\n' "$$" >"$XDG_RUNTIME_DIR/proxycode/active"
-  output=$(bash "$ROOT/install.sh" --install-only --wireproxy-bin "$TEST_HOME/custom/wireproxy" 2>&1)
+  output=$(bash "$ROOT/install.sh" --uninstall --yes 2>&1)
   status=$?
-  assert_eq 1 "$status" 'runtime-only ambiguous fresh install status'
-  [[ $output == *'identity is ambiguous'* ]] || fail 'runtime-only fresh install bypasses lifecycle refusal'
-  [[ ! -e $HOME/.local/bin/proxycode && ! -e $XDG_DATA_HOME/proxycode ]] || fail 'runtime-only refusal installs managed files'
+  assert_eq 1 "$status" 'overlapping XDG removal refusal status'
+  [[ $output == *'XDG Toolkit directories overlap'* ]] || fail 'overlapping XDG refusal lacks guidance'
+  [[ -f $profile/wireguard.conf ]] || fail 'overlapping XDG refusal changes Profile data'
 }
 
 test_purge_serializes_queued_cli_without_recreating_data() {
@@ -1118,6 +1094,86 @@ EOF
   output=$(<"$TEST_HOME/queued.out")
   [[ $output == *'installation changed while waiting'* ]] || fail 'queued CLI lacks maintenance-race guidance'
   [[ ! -e $XDG_CONFIG_HOME/proxycode && ! -e $XDG_DATA_HOME/proxycode && ! -e $XDG_STATE_HOME/proxycode && ! -e $XDG_RUNTIME_DIR/proxycode ]] || fail 'queued CLI recreates Toolkit data during purge'
+}
+
+test_reinstall_waits_for_previous_version_lock() {
+  TESTS=$((TESTS + 1))
+  new_home
+  install_custom_binary >/dev/null || { fail 'cross-version lock baseline succeeds'; return; }
+  local legacy_lock=$XDG_RUNTIME_DIR/proxycode/lifecycle.lock holder installer attempt
+  mkdir -p "${legacy_lock%/*}"
+  (
+    exec 9>"$legacy_lock"
+    flock -x 9
+    touch "$TEST_HOME/legacy-entered"
+    until [[ -e $TEST_HOME/legacy-release ]]; do sleep 0.05; done
+  ) & holder=$!
+  for attempt in {1..50}; do
+    [[ -e $TEST_HOME/legacy-entered ]] && break
+    sleep 0.05
+  done
+  [[ -e $TEST_HOME/legacy-entered ]] || { kill -TERM "$holder" 2>/dev/null; fail 'previous-version lock holder did not start'; return; }
+
+  bash "$ROOT/install.sh" --install-only --wireproxy-bin "$TEST_HOME/custom/wireproxy" >/dev/null & installer=$!
+  sleep 0.1
+  kill -0 "$installer" 2>/dev/null || fail 'reinstall bypasses the previous-version lifecycle lock'
+  touch "$TEST_HOME/legacy-release"
+  wait "$holder"
+  wait "$installer" || fail 'reinstall after previous-version lock succeeds'
+}
+
+test_symlinked_managed_source_is_rejected_and_preserved() {
+  TESTS=$((TESTS + 1))
+  new_home
+  local real_data=$TEST_HOME/real-data cli source output status
+  mkdir -p "$real_data"
+  ln -s "$real_data" "$TEST_HOME/data-link"
+  export XDG_DATA_HOME=$TEST_HOME/data-link
+  install_custom_binary >/dev/null || { fail 'symlinked-data baseline succeeds'; return; }
+  cli=$HOME/.local/bin/proxycode
+  source=$real_data/proxycode/bin/original.conf
+  write_wireguard_config "$source"
+  output=$("$cli" profile import "$source" --name rejected 2>&1)
+  status=$?
+  assert_eq 2 "$status" 'symlinked managed source rejection status'
+  [[ $output == *'must be outside Toolkit-managed directories'* ]] || fail 'symlinked managed source is accepted'
+  rm -f "$source"
+  source=$TEST_HOME/original.conf
+  write_wireguard_config "$source"
+  bash "$ROOT/install.sh" --purge --yes >/dev/null || { fail 'symlinked-data purge succeeds'; return; }
+  [[ -f $source ]] || fail 'purge deletes an original source outside canonical managed roots'
+}
+
+test_uninstall_preserves_profiles_nested_under_logs() {
+  TESTS=$((TESTS + 1))
+  new_home
+  export XDG_DATA_HOME=$XDG_STATE_HOME/proxycode/logs
+  local profile=$XDG_DATA_HOME/proxycode/profiles/work output status
+  mkdir -p "$profile"
+  printf 'preserve me\n' >"$profile/wireguard.conf"
+  output=$(bash "$ROOT/install.sh" --uninstall --yes 2>&1)
+  status=$?
+  assert_eq 1 "$status" 'nested XDG removal refusal status'
+  [[ $output == *'XDG Toolkit directories overlap'* ]] || fail 'nested XDG refusal lacks guidance'
+  [[ -f $profile/wireguard.conf ]] || fail 'nested XDG refusal deletes a Profile'
+}
+
+test_invalid_install_and_runtime_residue_cleanup() {
+  TESTS=$((TESTS + 1))
+  new_home
+  local invalid=$TEST_HOME/invalid-wireproxy output status
+  printf '#!/usr/bin/env bash\nexit 1\n' >"$invalid"
+  chmod 700 "$invalid"
+  output=$(bash "$ROOT/install.sh" --install-only --wireproxy-bin "$invalid" 2>&1)
+  status=$?
+  assert_eq 1 "$status" 'invalid custom binary status'
+  [[ ! -e $HOME/.local/bin/proxycode && ! -e $XDG_CONFIG_HOME/proxycode && ! -e $XDG_DATA_HOME/proxycode && ! -e $XDG_STATE_HOME/proxycode && ! -e $XDG_RUNTIME_DIR/proxycode ]] || fail 'failed validation changes live Toolkit state'
+
+  install_custom_binary >/dev/null || { fail 'runtime residue baseline succeeds'; return; }
+  mkdir -p "$XDG_RUNTIME_DIR/proxycode"
+  printf 'interrupted probe\n' >"$XDG_RUNTIME_DIR/proxycode/probe.abandoned"
+  bash "$ROOT/install.sh" --uninstall --yes >/dev/null || { fail 'runtime residue uninstall succeeds'; return; }
+  [[ ! -e $XDG_RUNTIME_DIR/proxycode ]] || fail 'uninstall reports success with runtime residue'
 }
 
 test_unsupported_platform_changes_nothing() {
@@ -1168,8 +1224,12 @@ test_reinstall_preserves_user_data_and_refuses_active
 test_incomplete_installation_recovery_and_downgrade_refusal
 test_uninstall_preserves_and_purge_deletes
 test_maintenance_process_safety_and_binary_drift
-test_maintenance_with_overlapping_roots_and_reduced_dependencies
+test_overlapping_roots_refuse_changes
 test_purge_serializes_queued_cli_without_recreating_data
+test_reinstall_waits_for_previous_version_lock
+test_symlinked_managed_source_is_rejected_and_preserved
+test_uninstall_preserves_profiles_nested_under_logs
+test_invalid_install_and_runtime_residue_cleanup
 test_unsupported_platform_changes_nothing
 test_missing_dependencies_change_nothing
 

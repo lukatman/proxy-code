@@ -85,8 +85,13 @@ acquire_lifecycle_lock() {
   mkdir -p "${PROXYCODE_RUNTIME_DIR%/*}" || die 'cannot create the lifecycle lock directory'
   exec {INSTALL_LOCK_FD}<"${PROXYCODE_RUNTIME_DIR%/*}" || die 'cannot open the lifecycle lock'
   flock -x "$INSTALL_LOCK_FD" || die 'cannot acquire the lifecycle lock'
-  mkdir -p "$PROXYCODE_RUNTIME_DIR" || die 'cannot create the lifecycle directory'
-  chmod 700 "$PROXYCODE_RUNTIME_DIR" || die 'cannot secure the lifecycle directory'
+  if [[ -e $PROXYCODE_RUNTIME_DIR/lifecycle.lock || -e $PROXYCODE_BIN_DIR/proxycode || -e $PROXYCODE_DATA_DIR/lib/proxycode.sh ]]; then
+    mkdir -p "$PROXYCODE_RUNTIME_DIR" || die 'cannot create the lifecycle directory'
+    chmod 700 "$PROXYCODE_RUNTIME_DIR" || die 'cannot secure the lifecycle directory'
+    exec {INSTALL_LEGACY_LOCK_FD}>"$PROXYCODE_RUNTIME_DIR/lifecycle.lock" || die 'cannot open the legacy lifecycle lock'
+    chmod 600 "$PROXYCODE_RUNTIME_DIR/lifecycle.lock" || die 'cannot secure the legacy lifecycle lock'
+    flock -x "$INSTALL_LEGACY_LOCK_FD" || die 'cannot acquire the legacy lifecycle lock'
+  fi
 }
 
 if [[ $mode != install-only ]]; then
@@ -111,53 +116,16 @@ if [[ $mode != install-only ]]; then
   [[ $PROXYCODE_ACTIVE_STATUS == stopped ]] || proxycode_stop_locked || die 'could not safely stop the Active Tunnel Profile'
   rm -f -- "$PROXYCODE_BIN_DIR/proxycode" || die 'could not remove the Toolkit command'
   if [[ $mode == purge ]]; then
-    rm -f -- "$PROXYCODE_CONFIG_DIR/settings" || die 'could not remove Toolkit settings'
-    rm -rf -- "$PROXYCODE_DATA_DIR/profiles" "$PROXYCODE_DATA_DIR/bin" "$PROXYCODE_DATA_DIR/lib" "$PROXYCODE_DATA_DIR/licenses" || die 'could not purge Toolkit data'
+    rm -rf -- "$PROXYCODE_CONFIG_DIR" "$PROXYCODE_DATA_DIR" "$PROXYCODE_STATE_DIR" "$PROXYCODE_RUNTIME_DIR" || die 'could not purge Toolkit data'
   else
-    rm -rf -- "$PROXYCODE_DATA_DIR/bin" "$PROXYCODE_DATA_DIR/lib" "$PROXYCODE_DATA_DIR/licenses" || die 'could not remove installed Toolkit files'
+    rm -rf -- "$PROXYCODE_DATA_DIR/bin" "$PROXYCODE_DATA_DIR/lib" "$PROXYCODE_DATA_DIR/licenses" "$PROXYCODE_STATE_DIR" "$PROXYCODE_RUNTIME_DIR" || die 'could not remove installed Toolkit files'
   fi
-  rm -rf -- "$PROXYCODE_STATE_DIR/logs" || die 'could not remove Toolkit logs'
-  rm -f -- "$PROXYCODE_STATE_DIR/install" "$PROXYCODE_RUNTIME_DIR/active" "$PROXYCODE_RUNTIME_DIR/lifecycle.lock" || die 'could not remove Toolkit state'
-  rmdir -- "$PROXYCODE_RUNTIME_DIR" "$PROXYCODE_STATE_DIR" "$PROXYCODE_DATA_DIR" "$PROXYCODE_CONFIG_DIR" 2>/dev/null || true
   if [[ $mode == purge ]]; then
     printf 'Purged the Toolkit.\n'
   else
     printf 'Uninstalled the Toolkit; Tunnel Profiles, Proxy credentials, and settings were preserved.\n'
   fi
   exit 0
-fi
-
-acquire_lifecycle_lock
-proxycode_inspect_active || die 'cannot inspect lifecycle state'
-case $PROXYCODE_ACTIVE_STATUS in
-  active|starting) die "Tunnel Profile '$PROXYCODE_ACTIVE_PROFILE' is active; run 'proxycode stop' before reinstalling" ;;
-  ambiguous)
-    proxycode_ambiguous_guidance
-    die 'active process identity is ambiguous; refusing to reinstall'
-    ;;
-esac
-
-installation_present=false
-installation_complete=true
-for installed_path in "$PROXYCODE_BIN_DIR/proxycode" "$PROXYCODE_DATA_DIR/bin/wireproxy" "$PROXYCODE_DATA_DIR/lib/proxycode.sh" "$PROXYCODE_DATA_DIR/licenses/wireproxy.LICENSE" "$PROXYCODE_STATE_DIR/install"; do
-  [[ -e $installed_path ]] && installation_present=true
-  [[ -e $installed_path ]] || installation_complete=false
-done
-if $installation_present; then
-  installed_toolkit_version= installed_wireproxy_version= installed_wireproxy_digest= installed_wireproxy_source=
-  if [[ -r $PROXYCODE_STATE_DIR/install ]]; then
-    installed_toolkit_version=$(proxycode_read_setting "$PROXYCODE_STATE_DIR/install" PROXYCODE_VERSION)
-    installed_wireproxy_version=$(proxycode_read_setting "$PROXYCODE_STATE_DIR/install" WIREPROXY_VERSION)
-    installed_wireproxy_digest=$(proxycode_read_setting "$PROXYCODE_STATE_DIR/install" WIREPROXY_SHA256)
-    installed_wireproxy_source=$(proxycode_read_setting "$PROXYCODE_STATE_DIR/install" WIREPROXY_SOURCE)
-  fi
-  if [[ $installed_toolkit_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && version_is_newer "$installed_toolkit_version" "$PROXYCODE_VERSION"; then
-    die "installed Toolkit has newer Toolkit version $installed_toolkit_version; refusing to downgrade to $PROXYCODE_VERSION"
-  fi
-  if ! $installation_complete ||
-    [[ ! $installed_toolkit_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! $installed_wireproxy_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! $installed_wireproxy_digest =~ ^[0-9a-f]{64}$ || ! $installed_wireproxy_source =~ ^(pinned|custom)$ ]]; then
-    printf 'Detected an incomplete installation; repairing it. If interrupted, rerun this fixed-version installer.\n'
-  fi
 fi
 
 os=$(uname -s)
@@ -268,6 +236,39 @@ EOF
 chmod 700 "$work_dir/payload/proxycode"
 chmod 600 "$work_dir/payload/proxycode.sh" "$work_dir/payload/wireproxy.LICENSE" "$work_dir/payload/install"
 bash -n "$work_dir/payload/proxycode" "$work_dir/payload/proxycode.sh" || die 'staged Toolkit validation failed'
+
+acquire_lifecycle_lock
+installation_present=false
+installation_complete=true
+for installed_path in "$PROXYCODE_BIN_DIR/proxycode" "$PROXYCODE_DATA_DIR/bin/wireproxy" "$PROXYCODE_DATA_DIR/lib/proxycode.sh" "$PROXYCODE_DATA_DIR/licenses/wireproxy.LICENSE" "$PROXYCODE_STATE_DIR/install"; do
+  [[ -e $installed_path ]] && installation_present=true
+  [[ -e $installed_path ]] || installation_complete=false
+done
+proxycode_inspect_active || die 'cannot inspect lifecycle state'
+case $PROXYCODE_ACTIVE_STATUS in
+  active|starting) die "Tunnel Profile '$PROXYCODE_ACTIVE_PROFILE' is active; run 'proxycode stop' before reinstalling" ;;
+  ambiguous)
+    proxycode_ambiguous_guidance
+    die 'active process identity is ambiguous; refusing to reinstall'
+    ;;
+esac
+
+if $installation_present; then
+  current_toolkit_version= current_wireproxy_version= current_wireproxy_digest= current_wireproxy_source=
+  if [[ -r $PROXYCODE_STATE_DIR/install ]]; then
+    current_toolkit_version=$(proxycode_read_setting "$PROXYCODE_STATE_DIR/install" PROXYCODE_VERSION)
+    current_wireproxy_version=$(proxycode_read_setting "$PROXYCODE_STATE_DIR/install" WIREPROXY_VERSION)
+    current_wireproxy_digest=$(proxycode_read_setting "$PROXYCODE_STATE_DIR/install" WIREPROXY_SHA256)
+    current_wireproxy_source=$(proxycode_read_setting "$PROXYCODE_STATE_DIR/install" WIREPROXY_SOURCE)
+  fi
+  if [[ $current_toolkit_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && version_is_newer "$current_toolkit_version" "$PROXYCODE_VERSION"; then
+    die "installed Toolkit has newer Toolkit version $current_toolkit_version; refusing to downgrade to $PROXYCODE_VERSION"
+  fi
+  if ! $installation_complete ||
+    [[ ! $current_toolkit_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! $current_wireproxy_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! $current_wireproxy_digest =~ ^[0-9a-f]{64}$ || ! $current_wireproxy_source =~ ^(pinned|custom)$ ]]; then
+    printf 'Detected an incomplete installation; repairing it. If interrupted, rerun this fixed-version installer.\n'
+  fi
+fi
 
 directories=(
   "$PROXYCODE_BIN_DIR"

@@ -3,6 +3,7 @@
 PROXYCODE_VERSION=1.0.0
 
 proxycode_init_paths() {
+  local home_root config_root data_root state_root runtime_root
   if [[ ${HOME:-} != /* || $HOME == / ]]; then
     printf 'proxycode: HOME must be an absolute user directory\n' >&2
     return 1
@@ -17,6 +18,31 @@ proxycode_init_paths() {
   else
     PROXYCODE_RUNTIME_DIR=$PROXYCODE_STATE_DIR
   fi
+
+  home_root=$(readlink -m "$HOME") || return 1
+  config_root=$(readlink -m "$PROXYCODE_CONFIG_DIR") || return 1
+  data_root=$(readlink -m "$PROXYCODE_DATA_DIR") || return 1
+  state_root=$(readlink -m "$PROXYCODE_STATE_DIR") || return 1
+  runtime_root=$(readlink -m "$PROXYCODE_RUNTIME_DIR") || return 1
+  case "$home_root/" in
+    "$config_root/"*|"$data_root/"*|"$state_root/"*|"$runtime_root/"*)
+      proxycode_error 'an XDG Toolkit directory cannot contain HOME; use non-overlapping XDG paths'
+      return
+      ;;
+  esac
+  if proxycode_paths_overlap "$config_root" "$data_root" ||
+    proxycode_paths_overlap "$config_root" "$state_root" ||
+    proxycode_paths_overlap "$config_root" "$runtime_root" ||
+    proxycode_paths_overlap "$data_root" "$state_root" ||
+    proxycode_paths_overlap "$data_root" "$runtime_root" ||
+    { [[ $state_root != "$runtime_root" ]] && proxycode_paths_overlap "$state_root" "$runtime_root"; }; then
+    proxycode_error 'XDG Toolkit directories overlap; use separate config, data, state, and runtime paths'
+    return
+  fi
+}
+
+proxycode_paths_overlap() {
+  [[ $1 == "$2" || $1 == "$2"/* || $2 == "$1"/* ]]
 }
 
 proxycode_xdg_path() {
@@ -284,13 +310,17 @@ proxycode_profile_remove() {
 }
 
 proxycode_profile_import() {
-  local source_file=$1 name=$2 make_default=$3 replace=$4 yes=$5 profile stage password backup existed=false
+  local source_file=$1 name=$2 make_default=$3 replace=$4 yes=$5 profile stage password backup config_root data_root state_root runtime_root existed=false
   proxycode_load_global_settings || return
   profile=$(proxycode_profile_path "$name") || { proxycode_error "invalid Tunnel Profile name '$name'" 2; return; }
   [[ -f $source_file && -r $source_file ]] || { proxycode_error "cannot read WireGuard configuration '$source_file'" 2; return; }
   source_file=$(readlink -f "$source_file") || { proxycode_error 'cannot resolve the WireGuard configuration' 2; return; }
+  config_root=$(readlink -f "$PROXYCODE_CONFIG_DIR") || return 1
+  data_root=$(readlink -f "$PROXYCODE_DATA_DIR") || return 1
+  state_root=$(readlink -f "$PROXYCODE_STATE_DIR") || return 1
+  runtime_root=$(readlink -f "$PROXYCODE_RUNTIME_DIR") || return 1
   case $source_file in
-    "$PROXYCODE_CONFIG_DIR"|"$PROXYCODE_CONFIG_DIR"/*|"$PROXYCODE_DATA_DIR"|"$PROXYCODE_DATA_DIR"/*|"$PROXYCODE_STATE_DIR"|"$PROXYCODE_STATE_DIR"/*|"$PROXYCODE_RUNTIME_DIR"|"$PROXYCODE_RUNTIME_DIR"/*)
+    "$config_root"|"$config_root"/*|"$data_root"|"$data_root"/*|"$state_root"|"$state_root"/*|"$runtime_root"|"$runtime_root"/*)
       proxycode_error 'the original WireGuard configuration must be outside Toolkit-managed directories' 2
       return
       ;;
@@ -378,6 +408,14 @@ proxycode_with_lifecycle_lock() {
   mkdir -p "${PROXYCODE_RUNTIME_DIR%/*}" || return 1
   exec {PROXYCODE_LOCK_FD}<"${PROXYCODE_RUNTIME_DIR%/*}" || return 1
   flock -x "$PROXYCODE_LOCK_FD" || return 1
+  [[ -x $PROXYCODE_BIN_DIR/proxycode && -r $PROXYCODE_DATA_DIR/lib/proxycode.sh && -r $PROXYCODE_STATE_DIR/install ]] || {
+    proxycode_error 'Toolkit installation changed while waiting; rerun the installer'
+    return
+  }
+  mkdir -p "$PROXYCODE_RUNTIME_DIR" || return 1
+  exec {PROXYCODE_LEGACY_LOCK_FD}>"$PROXYCODE_RUNTIME_DIR/lifecycle.lock" || return 1
+  chmod 600 "$PROXYCODE_RUNTIME_DIR/lifecycle.lock" || return 1
+  flock -x "$PROXYCODE_LEGACY_LOCK_FD" || return 1
   [[ -x $PROXYCODE_BIN_DIR/proxycode && -r $PROXYCODE_DATA_DIR/lib/proxycode.sh && -r $PROXYCODE_STATE_DIR/install ]] || {
     proxycode_error 'Toolkit installation changed while waiting; rerun the installer'
     return
@@ -609,6 +647,7 @@ EOF
   (
     cd "$profile" || exit
     exec {PROXYCODE_LOCK_FD}>&-
+    exec {PROXYCODE_LEGACY_LOCK_FD}>&-
     exec nohup "$executable" --config "$config"
   ) >>"$log" 2>&1 &
   pid=$!

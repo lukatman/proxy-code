@@ -171,6 +171,7 @@ case ${1:-} in
     [[ $1 != -* ]] || { printf "proxycode: unknown option '%s'\n" "$1" >&2; exit 2; }
     proxycode_with_lifecycle_lock proxycode_prepare_wrapped_command_locked "$selected_profile" || exit
     exec {PROXYCODE_LOCK_FD}>&-
+    exec {PROXYCODE_LEGACY_LOCK_FD}>&-
     export HTTP_PROXY=$PROXYCODE_WRAPPED_PROXY http_proxy=$PROXYCODE_WRAPPED_PROXY
     export HTTPS_PROXY=$PROXYCODE_WRAPPED_PROXY https_proxy=$PROXYCODE_WRAPPED_PROXY
     export ALL_PROXY=$PROXYCODE_WRAPPED_PROXY all_proxy=$PROXYCODE_WRAPPED_PROXY
