@@ -585,6 +585,165 @@ test_lifecycle_unknown_listener_refusal() {
   unset FAKE_PORT_BUSY
 }
 
+test_wrapped_command_environment_and_fidelity() {
+  TESTS=$((TESTS + 1))
+  new_home
+  install_custom_binary >/dev/null || { fail 'Wrapped command test install succeeds'; return; }
+  local cli=$HOME/.local/bin/proxycode source=$TEST_HOME/source/work.conf profile password command output status pid
+  write_wireguard_config "$source"
+  "$cli" profile import "$source" --name work --default >/dev/null || { fail 'Wrapped command Profile import succeeds'; return; }
+  "$cli" profile import "$source" --name travel >/dev/null || { fail 'Wrapped command alternate Profile import succeeds'; return; }
+  profile=$XDG_DATA_HOME/proxycode/profiles/work
+  install_lifecycle_fakes
+  EXPECTED_WIREPROXY_EXE=$(readlink -f "$XDG_DATA_HOME/proxycode/bin/wireproxy")
+  export EXPECTED_WIREPROXY_EXE
+  password=$(sed -n 's/^PASSWORD=//p' "$profile/proxy-credential")
+  export EXPECTED_PROXY_URL=http://proxy-code:$password@127.0.0.1:25345
+  export FAKE_CURL_CALLS=$TEST_HOME/curl-calls WIREPROXY_START_LOG=$TEST_HOME/wireproxy-starts
+  PATH=$TEST_HOME/lifecycle-fakes:$SYSTEM_PATH
+
+  command=$TEST_HOME/wrapped-command
+  cat >"$command" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$HTTP_PROXY" "$http_proxy" "$HTTPS_PROXY" "$https_proxy" "$ALL_PROXY" "$all_proxy" "$NO_PROXY" "$no_proxy" >"$WRAPPED_ENV_LOG"
+printf '%s\n' "$@" >"$WRAPPED_ARGV_LOG"
+pwd >"$WRAPPED_CWD_LOG"
+IFS= read -r input
+printf '%s\n' "$input" >"$WRAPPED_STDIN_LOG"
+for fd in /proc/$$/fd/*; do
+  [[ $(readlink "$fd" 2>/dev/null) != "$XDG_RUNTIME_DIR/proxycode/lifecycle.lock" ]] || exit 98
+done
+printf 'wrapped stdout\n'
+printf 'wrapped stderr\n' >&2
+exit 7
+EOF
+  chmod 700 "$command"
+  export WRAPPED_ENV_LOG=$TEST_HOME/wrapped-env WRAPPED_ARGV_LOG=$TEST_HOME/wrapped-argv
+  export WRAPPED_CWD_LOG=$TEST_HOME/wrapped-cwd WRAPPED_STDIN_LOG=$TEST_HOME/wrapped-stdin
+
+  output=$(printf 'wrapped stdin\n' | (cd "$TEST_HOME" && HTTP_PROXY=hostile http_proxy=hostile HTTPS_PROXY=hostile https_proxy=hostile ALL_PROXY=hostile all_proxy=hostile NO_PROXY='*' no_proxy='*' "$cli" --profile work "$command" 'space arg' '' '*.txt' --leading) 2>"$TEST_HOME/wrapped-stderr")
+  status=$?
+  assert_eq 7 "$status" 'Wrapped command exit status'
+  assert_eq 'wrapped stdout' "$output" 'Wrapped command stdout is untouched'
+  assert_eq 'wrapped stderr' "$(<"$TEST_HOME/wrapped-stderr")" 'Wrapped command stderr is untouched'
+  assert_eq $'space arg\n\n*.txt\n--leading' "$(<"$WRAPPED_ARGV_LOG")" 'Wrapped command argv is unchanged'
+  assert_eq "$TEST_HOME" "$(<"$WRAPPED_CWD_LOG")" 'Wrapped command working directory is unchanged'
+  assert_eq 'wrapped stdin' "$(<"$WRAPPED_STDIN_LOG")" 'Wrapped command stdin is unchanged'
+  assert_eq "$EXPECTED_PROXY_URL" "$(sed -n '1p' "$WRAPPED_ENV_LOG")" 'Wrapped command receives the authenticated proxy'
+  [[ $(sed -n '1,6p' "$WRAPPED_ENV_LOG" | sort -u) == "$EXPECTED_PROXY_URL" ]] || fail 'proxy variables are not replaced identically'
+  assert_eq $'localhost,127.0.0.1,::1\nlocalhost,127.0.0.1,::1' "$(sed -n '7,8p' "$WRAPPED_ENV_LOG")" 'bypass variables are replaced with local-only values'
+  [[ $output != *"$password"* && $(<"$TEST_HOME/wrapped-stderr") != *"$password"* ]] || fail 'Wrapped command launch prints the Proxy credential'
+  ! grep -Fq "$password" "$XDG_STATE_HOME/proxycode/logs/work/wireproxy.log" || fail 'WireProxy log exposes the Proxy credential'
+  pid=$(sed -n 's/^PID=//p' "$XDG_RUNTIME_DIR/proxycode/active")
+  [[ -e /proc/$pid ]] || fail 'WireProxy does not remain active after the Wrapped command exits'
+
+  local calls marker=$TEST_HOME/refused-command-ran
+  calls=$(<"$FAKE_CURL_CALLS")
+  "$cli" --profile work /usr/bin/true || fail 'Wrapped command reuses its matching Active Tunnel Profile'
+  assert_eq "$calls" "$(<"$FAKE_CURL_CALLS")" 'Wrapped command reuse performs no health probe'
+  output=$("$cli" --profile travel /usr/bin/touch "$marker" 2>&1)
+  status=$?
+  assert_eq 1 "$status" 'Wrapped command refuses a different Active Tunnel Profile'
+  [[ $output == *"Tunnel Profile 'work' is active; stop it first"* && ! -e $marker ]] || fail 'Wrapped command refusal is unclear or executes the command'
+  [[ $(sed -n 's/^PROFILE=//p' "$XDG_RUNTIME_DIR/proxycode/active") == work ]] || fail 'Wrapped command refusal changes the Active Tunnel Profile'
+  assert_status 2 'empty explicit Profile selection status' "$cli" --profile '' /usr/bin/touch "$marker"
+  [[ ! -e $marker ]] || fail 'empty explicit Profile selection executes the command'
+
+  mv "$profile/proxy-credential" "$profile/proxy-credential.saved"
+  output=$("$cli" --profile work /usr/bin/true 2>&1)
+  status=$?
+  assert_eq 1 "$status" 'missing Proxy credential reuse status'
+  [[ $output == *'Proxy credential is invalid'* ]] || fail 'missing Proxy credential reuse fails silently'
+  mv "$profile/proxy-credential.saved" "$profile/proxy-credential"
+  "$cli" stop >/dev/null || { kill -TERM "$pid" 2>/dev/null; fail 'Wrapped command test cleanup succeeds'; }
+}
+
+test_explicit_switch_success_and_failure() {
+  TESTS=$((TESTS + 1))
+  new_home
+  install_custom_binary >/dev/null || { fail 'switch test install succeeds'; return; }
+  local cli=$HOME/.local/bin/proxycode source=$TEST_HOME/source/work.conf work_password travel_password output status pid
+  write_wireguard_config "$source"
+  "$cli" profile import "$source" --name work --default >/dev/null || { fail 'switch source Profile import succeeds'; return; }
+  "$cli" profile import "$source" --name travel >/dev/null || { fail 'switch target Profile import succeeds'; return; }
+  install_lifecycle_fakes
+  EXPECTED_WIREPROXY_EXE=$(readlink -f "$XDG_DATA_HOME/proxycode/bin/wireproxy")
+  export EXPECTED_WIREPROXY_EXE
+  work_password=$(sed -n 's/^PASSWORD=//p' "$XDG_DATA_HOME/proxycode/profiles/work/proxy-credential")
+  travel_password=$(sed -n 's/^PASSWORD=//p' "$XDG_DATA_HOME/proxycode/profiles/travel/proxy-credential")
+  export EXPECTED_PROXY_URL=http://proxy-code:$work_password@127.0.0.1:25345
+  export FAKE_CURL_CALLS=$TEST_HOME/curl-calls WIREPROXY_START_LOG=$TEST_HOME/wireproxy-starts
+  PATH=$TEST_HOME/lifecycle-fakes:$SYSTEM_PATH
+  "$cli" start work >/dev/null || { fail 'switch source Profile starts'; return; }
+
+  output=$("$cli" switch travel 2>&1)
+  status=$?
+  assert_eq 2 "$status" 'non-interactive switch requires consent'
+  [[ $output == *'confirmation requires a terminal'* ]] || fail 'unconfirmed switch lacks consent guidance'
+  [[ $(sed -n 's/^PROFILE=//p' "$XDG_RUNTIME_DIR/proxycode/active") == work ]] || fail 'unconfirmed switch changes the Active Tunnel Profile'
+
+  export EXPECTED_PROXY_URL=http://proxy-code:$travel_password@127.0.0.1:25345
+  output=$("$cli" switch travel --yes) || { fail 'confirmed switch succeeds'; return; }
+  assert_eq $'Stopped Tunnel Profile: work\nStarted Tunnel Profile: travel\nLocation: SG' "$output" 'successful switch output'
+  [[ $(sed -n 's/^PROFILE=//p' "$XDG_RUNTIME_DIR/proxycode/active") == travel ]] || fail 'successful switch does not activate its target'
+  assert_eq 'Tunnel Profile already active: travel' "$("$cli" switch travel)" 'switching to the Active Profile is idempotent without consent'
+
+  export EXPECTED_PROXY_URL=http://proxy-code:$work_password@127.0.0.1:25345 FAKE_CURL_EXIT=60
+  output=$("$cli" switch work --yes 2>&1)
+  status=$?
+  assert_eq 1 "$status" 'failed switch activation status'
+  [[ $output == *'Stopped Tunnel Profile: travel'* && $output == *'health check failed'* ]] || fail 'failed switch does not explain stop and activation failure'
+  [[ ! -e $XDG_RUNTIME_DIR/proxycode/active ]] || fail 'failed switch does not leave the Toolkit stopped'
+  pid=$(sed -n '3p' "$WIREPROXY_START_LOG")
+  [[ -z $pid || ! -e /proc/$pid ]] || { kill -TERM "$pid" 2>/dev/null; fail 'failed switch leaves its new WireProxy process running'; }
+  unset FAKE_CURL_EXIT
+}
+
+test_active_profile_management_constraints() {
+  TESTS=$((TESTS + 1))
+  new_home
+  install_custom_binary >/dev/null || { fail 'Active Profile management test install succeeds'; return; }
+  local cli=$HOME/.local/bin/proxycode source=$TEST_HOME/source/work.conf profile password output status pid
+  write_wireguard_config "$source"
+  "$cli" profile import "$source" --name work --default >/dev/null || { fail 'Active Profile management import succeeds'; return; }
+  profile=$XDG_DATA_HOME/proxycode/profiles/work
+  install_lifecycle_fakes
+  EXPECTED_WIREPROXY_EXE=$(readlink -f "$XDG_DATA_HOME/proxycode/bin/wireproxy")
+  export EXPECTED_WIREPROXY_EXE
+  password=$(sed -n 's/^PASSWORD=//p' "$profile/proxy-credential")
+  export EXPECTED_PROXY_URL=http://proxy-code:$password@127.0.0.1:25345
+  export FAKE_CURL_CALLS=$TEST_HOME/curl-calls WIREPROXY_START_LOG=$TEST_HOME/wireproxy-starts
+  PATH=$TEST_HOME/lifecycle-fakes:$SYSTEM_PATH
+  "$cli" start work >/dev/null || { fail 'Active Profile management source starts'; return; }
+  pid=$(sed -n 's/^PID=//p' "$XDG_RUNTIME_DIR/proxycode/active")
+
+  output=$("$cli" settings --http-port 31080 2>&1)
+  status=$?
+  assert_eq 1 "$status" 'HTTP port change while active status'
+  [[ $output == *'stop it first'* ]] || fail 'active HTTP port refusal lacks stop guidance'
+  assert_eq 'HTTP port: 25345' "$("$cli" settings)" 'active HTTP port refusal changes settings'
+
+  printf '\n# replacement\n' >>"$source"
+  output=$("$cli" profile import "$source" --name work --replace --yes) || { fail 'Active Profile replacement succeeds'; return; }
+  assert_eq $'Stopped Tunnel Profile: work\nReplaced Tunnel Profile: work' "$output" 'Active Profile replacement output'
+  [[ ! -e $XDG_RUNTIME_DIR/proxycode/active && ! -e /proc/$pid ]] || fail 'Active Profile replacement leaves its old process or state behind'
+  cmp -s "$source" "$profile/wireguard.conf" || fail 'Active Profile replacement does not install the new private copy'
+  "$cli" start work >/dev/null || { fail 'replaced Active Profile restarts'; return; }
+  pid=$(sed -n 's/^PID=//p' "$XDG_RUNTIME_DIR/proxycode/active")
+
+  export FAKE_READLINK_EXE=/usr/bin/not-wireproxy
+  output=$("$cli" profile remove work --yes 2>&1)
+  status=$?
+  assert_eq 1 "$status" 'unverified Active Profile removal status'
+  [[ $output == *'identity is ambiguous'* && -d $profile && -e /proc/$pid ]] || fail 'unverified Active Profile removal deletes files or signals the process'
+  unset FAKE_READLINK_EXE
+
+  output=$("$cli" profile remove work --yes) || { fail 'verified Active Profile removal succeeds'; return; }
+  assert_eq $'Stopped Tunnel Profile: work\nRemoved Tunnel Profile: work' "$output" 'Active Profile removal output'
+  [[ ! -e $profile && ! -e $XDG_RUNTIME_DIR/proxycode/active && ! -e /proc/$pid ]] || fail 'Active Profile removal leaves Profile, state, or process behind'
+  [[ -f $source ]] || fail 'Active Profile removal touches the source configuration'
+}
+
 make_release_fakes() {
   local arch=$1 digest_mode=${2:-valid}
   mkdir -p "$TEST_HOME/fakes"
@@ -732,6 +891,9 @@ test_lifecycle_failed_start_cleanup
 test_lifecycle_stale_and_ambiguous_state
 test_lifecycle_lock_serializes_start
 test_lifecycle_unknown_listener_refusal
+test_wrapped_command_environment_and_fidelity
+test_explicit_switch_success_and_failure
+test_active_profile_management_constraints
 test_pinned_architectures
 test_verification_failure_preserves_installation
 test_commit_failure_rolls_back
