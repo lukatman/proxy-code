@@ -132,7 +132,15 @@ proxycode_validate_port() {
 proxycode_settings_update() {
   local http_port=$1
   proxycode_load_global_settings || return
-  [[ -z $http_port ]] || { proxycode_validate_port "$http_port" || { proxycode_error 'HTTP port must be an integer in 1..65535' 2; return; }; PROXYCODE_HTTP_PORT=$((10#$http_port)); }
+  if [[ -n $http_port ]]; then
+    proxycode_validate_port "$http_port" || { proxycode_error 'HTTP port must be an integer in 1..65535' 2; return; }
+    http_port=$((10#$http_port))
+    if [[ $http_port != "$PROXYCODE_HTTP_PORT" ]]; then
+      proxycode_inspect_active || return
+      [[ $PROXYCODE_ACTIVE_STATUS == stopped ]] || { proxycode_error 'a Tunnel Profile is active or unresolved; stop it first'; return; }
+      PROXYCODE_HTTP_PORT=$http_port
+    fi
+  fi
   proxycode_save_global_settings || return
   proxycode_settings_show
 }
@@ -248,6 +256,15 @@ proxycode_profile_remove() {
   profile=$(proxycode_profile_path "$name") || { proxycode_error "invalid Tunnel Profile name '$name'" 2; return; }
   [[ -d $profile ]] || { proxycode_error "Tunnel Profile '$name' does not exist" 2; return; }
   proxycode_confirm "$yes" "Remove Tunnel Profile '$name'?" || return
+  proxycode_inspect_active || return
+  if [[ $PROXYCODE_ACTIVE_STATUS == ambiguous ]]; then
+    proxycode_error 'active process identity is ambiguous; refusing to remove a Tunnel Profile'
+    proxycode_ambiguous_guidance
+    return 1
+  fi
+  if [[ $PROXYCODE_ACTIVE_STATUS != stopped && $PROXYCODE_ACTIVE_PROFILE == "$name" ]]; then
+    proxycode_stop_locked || return
+  fi
   if [[ $PROXYCODE_DEFAULT_PROFILE == "$name" ]]; then
     PROXYCODE_DEFAULT_PROFILE=
     proxycode_save_global_settings || return
@@ -298,6 +315,10 @@ EOF
     return
   fi
   if $existed; then
+    proxycode_inspect_active || { rm -rf -- "$stage"; return; }
+    if [[ $PROXYCODE_ACTIVE_STATUS != stopped && $PROXYCODE_ACTIVE_PROFILE == "$name" ]]; then
+      proxycode_stop_locked || { rm -rf -- "$stage"; return; }
+    fi
     backup=$PROXYCODE_DATA_DIR/profiles/.${name}.old.$$
     mv -- "$profile" "$backup" || { rm -rf -- "$stage"; return 1; }
     if ! mv -- "$stage" "$profile"; then
@@ -628,6 +649,32 @@ EOF
     return 1
   fi
   printf 'Started Tunnel Profile: %s\nLocation: %s\n' "$name" "${PROXYCODE_PROBE_LOCATION:-unavailable}"
+}
+
+proxycode_prepare_wrapped_command_locked() {
+  local name=$1 profile username password
+  name=${name:-$PROXYCODE_DEFAULT_PROFILE}
+  proxycode_start_locked "$name" >/dev/null || return
+  profile=$(proxycode_profile_path "$name") || return 1
+  if ! username=$(proxycode_read_setting "$profile/proxy-credential" USERNAME) ||
+    ! password=$(proxycode_read_setting "$profile/proxy-credential" PASSWORD) ||
+    [[ $username != proxy-code || -z $password ]]; then
+    proxycode_error "Tunnel Profile '$name' Proxy credential is invalid"
+    return
+  fi
+  PROXYCODE_WRAPPED_PROXY=http://$username:$password@127.0.0.1:$PROXYCODE_HTTP_PORT
+}
+
+proxycode_switch_locked() {
+  local name=$1 yes=$2 profile
+  profile=$(proxycode_profile_path "$name") || { proxycode_error "invalid Tunnel Profile name '$name'" 2; return; }
+  [[ -d $profile ]] || { proxycode_error "Tunnel Profile '$name' does not exist" 2; return; }
+  proxycode_inspect_active || return
+  if [[ $PROXYCODE_ACTIVE_STATUS == active && $PROXYCODE_ACTIVE_PROFILE != "$name" ]]; then
+    proxycode_confirm "$yes" "Switch from Tunnel Profile '$PROXYCODE_ACTIVE_PROFILE' to '$name'?" || return
+    proxycode_stop_locked || return
+  fi
+  proxycode_start_locked "$name"
 }
 
 proxycode_wait_until_stopped() {

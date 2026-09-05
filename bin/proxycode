@@ -10,6 +10,19 @@ fi
 # shellcheck source=../lib/proxycode.sh
 source "$library"
 
+selected_profile=
+if [[ ${1:-} == --profile ]]; then
+  (($# >= 3)) || { printf 'Usage: proxycode --profile NAME COMMAND [ARG...]\n' >&2; exit 2; }
+  selected_profile=$2
+  proxycode_validate_profile_name "$selected_profile" || { printf "proxycode: invalid Tunnel Profile name '%s'\n" "$selected_profile" >&2; exit 2; }
+  shift 2
+fi
+case ${1:-} in
+  help|--help|version|--version|status|check|start|stop|switch|profile|settings|upgrade)
+    [[ -z $selected_profile ]] || { printf 'proxycode: --profile is only valid with a Wrapped command\n' >&2; exit 2; }
+    ;;
+esac
+
 case ${1:-} in
   help|--help)
     (($# == 1)) || { printf 'proxycode help: unexpected arguments\n' >&2; exit 2; }
@@ -34,6 +47,15 @@ case ${1:-} in
   check)
     (($# == 1)) || { printf 'Usage: proxycode check\n' >&2; exit 2; }
     proxycode_with_lifecycle_lock proxycode_check_locked
+    ;;
+  switch)
+    (($# == 2 || $# == 3)) || { printf 'Usage: proxycode switch NAME [--yes]\n' >&2; exit 2; }
+    yes=false
+    if (($# == 3)); then
+      [[ $3 == --yes ]] || { printf "proxycode switch: unknown option '%s'\n" "$3" >&2; exit 2; }
+      yes=true
+    fi
+    proxycode_with_lifecycle_lock proxycode_switch_locked "$2" "$yes"
     ;;
   profile)
     shift
@@ -69,7 +91,7 @@ case ${1:-} in
           shift
         done
         [[ -n $name ]] || { printf 'proxycode profile import: --name is required\n' >&2; exit 2; }
-        proxycode_profile_import "$source_file" "$name" "$make_default" "$replace" "$yes"
+        proxycode_with_lifecycle_lock proxycode_profile_import "$source_file" "$name" "$make_default" "$replace" "$yes"
         ;;
       default)
         (($# == 2)) || { printf 'Usage: proxycode profile default NAME\n' >&2; exit 2; }
@@ -82,7 +104,7 @@ case ${1:-} in
           [[ $3 == --yes ]] || { printf "proxycode profile remove: unknown option '%s'\n" "$3" >&2; exit 2; }
           yes=true
         fi
-        proxycode_profile_remove "$2" "$yes"
+        proxycode_with_lifecycle_lock proxycode_profile_remove "$2" "$yes"
         ;;
       settings)
         (($# >= 2)) || { printf 'Usage: proxycode profile settings NAME [PROBE OPTIONS]\n' >&2; exit 2; }
@@ -134,7 +156,11 @@ case ${1:-} in
       esac
       shift
     done
-    proxycode_settings_update "$http_port"
+    proxycode_with_lifecycle_lock proxycode_settings_update "$http_port"
+    ;;
+  upgrade)
+    printf 'proxycode: upgrade is not available yet\n' >&2
+    exit 2
     ;;
   '')
     printf 'proxycode: interactive management is not available yet\n' >&2
@@ -142,8 +168,13 @@ case ${1:-} in
     exit 2
     ;;
   *)
-    printf "proxycode: unsupported command '%s'\n" "$1" >&2
-    printf 'Try: proxycode help\n' >&2
-    exit 2
+    [[ $1 != -* ]] || { printf "proxycode: unknown option '%s'\n" "$1" >&2; exit 2; }
+    proxycode_with_lifecycle_lock proxycode_prepare_wrapped_command_locked "$selected_profile" || exit
+    exec {PROXYCODE_LOCK_FD}>&-
+    export HTTP_PROXY=$PROXYCODE_WRAPPED_PROXY http_proxy=$PROXYCODE_WRAPPED_PROXY
+    export HTTPS_PROXY=$PROXYCODE_WRAPPED_PROXY https_proxy=$PROXYCODE_WRAPPED_PROXY
+    export ALL_PROXY=$PROXYCODE_WRAPPED_PROXY all_proxy=$PROXYCODE_WRAPPED_PROXY
+    export NO_PROXY=localhost,127.0.0.1,::1 no_proxy=localhost,127.0.0.1,::1
+    exec "$@"
     ;;
 esac
