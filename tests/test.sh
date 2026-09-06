@@ -1297,10 +1297,10 @@ test_interactive_setup_cancel_and_activation_failure() {
   status=$?
   assert_eq 0 "$status" 'interactive cancellation status'
   [[ $output == *'Cancelled. No changes were made.'* ]] || fail 'interactive cancellation is not reported'
-  [[ $output == *$'\033[38;2;167;139;250m\033[1m◆ ProxyCode\033[0m  setup'* ]] || fail 'interactive setup heading does not use the approved purple'
+  [[ $output == *$'\033[38;2;113;113;122m┌───\033[0m\033[48;2;167;139;250m\033[38;2;9;9;11m\033[1m ProxyCode \033[0m  setup'* ]] || fail 'interactive setup heading does not use the approved bold connected badge'
   [[ $output == *$'\033[38;2;103;232;249m?\033[0m What would you like to do?'* ]] || fail 'interactive setup question does not use the approved cyan accent'
   [[ $output == *$'\033[38;2;167;139;250m❯ Cancel\033[0m'* ]] || fail 'interactive setup does not use the approved selection cursor'
-  [[ $output == *'↑↓ move, enter confirm'* ]] || fail 'interactive setup omits menu navigation guidance'
+  [[ $output == *'Cancel'*'↑↓ move, enter confirm'* ]] || fail 'interactive setup omits the spaced navigation footer'
   [[ $output == *$'\033[38;2;134;239;172m◇\033[0m What would you like to do?'*$'\033[38;2;134;239;172mCancel\033[0m'* ]] || fail 'interactive setup does not preserve the selected answer as a Clack trail'
   [[ $output == *$'\033[?25l'* && $output == *$'\033[?25h'* ]] || fail 'interactive setup does not hide and restore the native cursor'
   [[ ! -e $XDG_DATA_HOME/proxycode ]] || fail 'interactive cancellation changes data'
@@ -1316,7 +1316,7 @@ test_interactive_setup_cancel_and_activation_failure() {
   make_release_fakes x86_64
   output=$(run_tty "$DOWN$DOWN
 " bash "$ROOT/install.sh")
-  [[ $output == *'◆ ProxyCode'*setup* && $output == *'Cancelled. No changes were made.'* ]] || fail 'no-option terminal reinstall bypasses interactive setup'
+  [[ $output == *' ProxyCode '*setup* && $output == *'Cancelled. No changes were made.'* ]] || fail 'no-option terminal reinstall bypasses interactive setup'
   assert_eq "$before" "$(installation_digest)" 'interactive reinstall cancellation changes the installation'
 
   new_home
@@ -1342,10 +1342,10 @@ r$DOWN$DOWN
 " bash "$ROOT/install.sh")
   status=$?
   assert_eq 0 "$status" 'final review restart and cancellation status'
-  [[ $output == *$'◆ ProxyCode\033[0m  review'* && $output == *'[Enter] install  ·  [R] restart'* ]] || fail 'interactive review does not match the approved controls'
+  [[ $output == *$' ProxyCode \033[0m  review'* && $output == *'[Enter] install  ·  [R] restart'* ]] || fail 'interactive review does not match the approved controls'
   [[ $output == *$'\033[38;2;103;232;249m\033[7me\033[0m\033[38;2;113;113;122mnter here\033[0m'* ]] || fail 'WireGuard configuration hint does not begin under the block cursor'
   [[ $output != *'▏'* ]] || fail 'interactive text input still renders a thin cursor'
-  review_heading=$'◆ ProxyCode\033[0m  review'
+  review_heading=$' ProxyCode \033[0m  review'
   [[ $output == *"$review_heading"*"$review_heading"* ]] || fail 'restarted setup does not reach a second review'
   [[ $output == *'Cancelled. No changes were made.'* ]] || fail 'restarted setup cannot be cancelled safely'
   [[ ! -e $XDG_DATA_HOME/proxycode ]] || fail 'final review cancellation commits staged changes'
@@ -1375,7 +1375,7 @@ $binary
 " bash "$ROOT/install.sh" 2>&1)
   status=$?
   assert_eq 1 "$status" 'interactive activation failure status'
-  [[ $output == *'Mullvad recommended'* && $output == *$'◆ ProxyCode\033[0m  review'* ]] || fail 'interactive setup omits reviewed provider-neutral guidance'
+  [[ $output == *'Mullvad recommended'* && $output == *$' ProxyCode \033[0m  review'* ]] || fail 'interactive setup omits reviewed provider-neutral guidance'
   [[ $output == *'health check failed'* && $output == *"retry 'proxycode start work'"* ]] || fail 'interactive activation failure lacks recovery guidance'
   assert_eq 1 "$(<"$FAKE_CURL_CALLS")" 'interactive activation failure reaches the intended health probe'
   [[ -d $XDG_DATA_HOME/proxycode/profiles/work ]] || fail 'activation failure loses the imported Profile'
@@ -1434,9 +1434,9 @@ $DOWN$DOWN$DOWN$DOWN$DOWN$DOWN$DOWN$DOWN
 " "$cli")
   [[ $output == *'Default: none'* && $output == *'Import a Tunnel Profile'* ]] || fail 'management menu omits state or settled actions'
   [[ $output == *$'\033[38;2;167;139;250m>\033[0m \033[38;2;103;232;249m\033[7mt\033[0m\033[38;2;113;113;122mype to filter\033[0m'* ]] || fail 'management filter placeholder does not begin under the block cursor'
-  [[ $output == *'↑↓ move, enter confirm'* ]] || fail 'management filter omits menu navigation guidance'
+  [[ $output == *'Exit'*'↑↓ move, enter confirm'* ]] || fail 'management filter omits the spaced navigation footer'
   [[ $output == *'Imported Tunnel Profile: travel'* ]] || fail 'management menu does not replace the suggested Profile name'
-  assert_eq 1 "$(grep -ao '◆ ProxyCode' <<<"$output" | wc -l)" 'management repeats its heading after an action'
+  assert_eq 1 "$(grep -ao ' ProxyCode ' <<<"$output" | wc -l)" 'management repeats its heading after an action'
   assert_eq 'travel' "$($cli profile list)" 'management import persists the Profile'
   assert_eq 'travel' "$(sed -n 's/^DEFAULT_PROFILE=//p' "$XDG_CONFIG_HOME/proxycode/settings")" 'management import selects Default when requested'
 
@@ -1539,7 +1539,7 @@ $TEST_HOME/custom/wireproxy
 " env PATH="$TEST_HOME/bootstrap-fakes:$SYSTEM_PATH" bash -c "cat '$ROOT/install.sh' | bash") || {
     fail 'piped interactive setup succeeds'; return;
   }
-  [[ $output == *'◆ ProxyCode'*setup* && $output == *'Installed custom WireProxy v1.1.3.'* ]] || fail 'piped installer does not prompt on the terminal'
+  [[ $output == *' ProxyCode '*setup* && $output == *'Installed custom WireProxy v1.1.3.'* ]] || fail 'piped installer does not prompt on the terminal'
 }
 
 test_custom_install_and_cli

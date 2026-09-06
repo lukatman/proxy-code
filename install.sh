@@ -236,7 +236,8 @@ if [[ -z $mode ]]; then
     mode=install-only
   else
     interactive=true
-    printf '\033[?25l\n%s%s◆ ProxyCode%s  setup\n\n' "$PROXYCODE_PURPLE" "$PROXYCODE_BOLD" "$PROXYCODE_RESET"
+    printf '\033[?25l'
+    proxycode_heading setup
     trap 'printf "\033[?25h"' EXIT
     proxycode_choose 'What would you like to do?' \
       'Install and set up a Tunnel Profile' \
@@ -532,7 +533,8 @@ if [[ $mode == profile ]]; then
 fi
 
 if $interactive; then
-  printf '\033[?25l\n%s%s◆ ProxyCode%s  review\n\n' "$PROXYCODE_PURPLE" "$PROXYCODE_BOLD" "$PROXYCODE_RESET"
+  printf '\033[?25l'
+  proxycode_heading review
 else
   printf 'Review installation:\n'
 fi

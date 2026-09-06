@@ -68,7 +68,7 @@ interactive_management() {
   fi
   printf '\033[?25l'
   trap 'printf "\033[?25h"' EXIT
-  printf '\n%s%s◆ ProxyCode%s  management\n\n' "$PROXYCODE_PURPLE" "$PROXYCODE_BOLD" "$PROXYCODE_RESET"
+  proxycode_heading management
   proxycode_with_lifecycle_lock proxycode_status_locked || true
   printf '\n'
   while :; do

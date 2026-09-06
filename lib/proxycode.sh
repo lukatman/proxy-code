@@ -2,10 +2,12 @@
 
 PROXYCODE_VERSION=1.0.0
 PROXYCODE_PURPLE=$'\033[38;2;167;139;250m'
+PROXYCODE_PURPLE_BG=$'\033[48;2;167;139;250m'
+PROXYCODE_INK=$'\033[38;2;9;9;11m'
+PROXYCODE_TITLE_WEIGHT=$'\033[1m'
 PROXYCODE_CYAN=$'\033[38;2;103;232;249m'
 PROXYCODE_GREEN=$'\033[38;2;134;239;172m'
 PROXYCODE_MUTED=$'\033[38;2;113;113;122m'
-PROXYCODE_BOLD=$'\033[1m'
 PROXYCODE_RESET=$'\033[0m'
 
 proxycode_init_paths() {
@@ -85,6 +87,12 @@ proxycode_error() {
   return "${2:-1}"
 }
 
+proxycode_heading() {
+  printf '\n%s┌───%s%s%s%s ProxyCode %s  %s\n%s│%s\n' \
+    "$PROXYCODE_MUTED" "$PROXYCODE_RESET" "$PROXYCODE_PURPLE_BG" "$PROXYCODE_INK" \
+    "$PROXYCODE_TITLE_WEIGHT" "$PROXYCODE_RESET" "$1" "$PROXYCODE_MUTED" "$PROXYCODE_RESET"
+}
+
 proxycode_menu_clear() {
   printf '\033[%dA\r\033[J' "$1"
 }
@@ -122,8 +130,8 @@ proxycode_choose() {
       else
         printf '%s\033[7mt%s%sype to filter%s\n' "$PROXYCODE_CYAN" "$PROXYCODE_RESET" "$PROXYCODE_MUTED" "$PROXYCODE_RESET"
       fi
-      printf '  %s↑↓ move, enter confirm%s\n\n' "$PROXYCODE_MUTED" "$PROXYCODE_RESET"
-      rendered_lines=4
+      printf '\n'
+      rendered_lines=3
     else
       printf '%s?%s %s\n' "$PROXYCODE_CYAN" "$PROXYCODE_RESET" "$prompt"
       rendered_lines=1
@@ -142,10 +150,8 @@ proxycode_choose() {
       fi
       rendered_lines=$((rendered_lines + 1))
     done
-    if ! $filter; then
-      printf '%s  ↑↓ move, enter confirm%s\n' "$PROXYCODE_MUTED" "$PROXYCODE_RESET"
-      rendered_lines=$((rendered_lines + 1))
-    fi
+    printf '\n%s  ↑↓ move, enter confirm%s\n' "$PROXYCODE_MUTED" "$PROXYCODE_RESET"
+    rendered_lines=$((rendered_lines + 2))
     IFS= read -rsN1 key || return 1
     case $key in
       $'\n'|$'\r')
