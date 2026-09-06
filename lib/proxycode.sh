@@ -79,6 +79,55 @@ proxycode_error() {
   return "${2:-1}"
 }
 
+proxycode_choose() {
+  local prompt=$1 key rest number option selected=0
+  shift
+  while :; do
+    printf '? %s\n' "$prompt"
+    for ((number = 1; number <= $#; number++)); do
+      option=${!number}
+      if ((number - 1 == selected)); then
+        printf '\033[36m❯ %s\033[0m\n' "$option"
+      else
+        printf '  %s\n' "$option"
+      fi
+    done
+    IFS= read -rsN1 key || return 1
+    case $key in
+      $'\n'|$'\r') PROXYCODE_CHOICE=$((selected + 1)); return ;;
+      $'\033')
+        IFS= read -rsN2 -t 0.2 rest || return 130
+        case $rest in
+          '[A') selected=$(((selected + $# - 1) % $#)) ;;
+          '[B') selected=$(((selected + 1) % $#)) ;;
+          *) return 130 ;;
+        esac
+        ;;
+      k) selected=$(((selected + $# - 1) % $#)) ;;
+      j) selected=$(((selected + 1) % $#)) ;;
+    esac
+    printf '\033[%dA' "$(( $# + 1 ))"
+  done
+}
+
+proxycode_prompt() {
+  local prompt=$1 default=${2:-} answer
+  if [[ -n $default ]]; then
+    printf '? %s [%s]: ' "$prompt" "$default"
+  else
+    printf '? %s: ' "$prompt"
+  fi
+  IFS= read -r answer || return 1
+  PROXYCODE_ANSWER=${answer:-$default}
+}
+
+proxycode_suggest_profile_name() {
+  local suggestion=${1##*/}
+  suggestion=${suggestion%.conf}
+  suggestion=$(printf '%s' "$suggestion" | sed -E 's/[^A-Za-z0-9._-]+/-/g; s/^[^A-Za-z0-9]+//; s/[^A-Za-z0-9]+$//')
+  proxycode_validate_profile_name "$suggestion" && printf '%s' "$suggestion" || printf profile
+}
+
 proxycode_write_private() {
   local target=$1 temporary=${1}.new.$$
   if ! cat >"$temporary" || ! chmod 600 "$temporary" || ! mv -f -- "$temporary" "$target"; then
@@ -402,26 +451,32 @@ proxycode_prepare_lifecycle() {
 }
 
 proxycode_with_lifecycle_lock() {
-  local operation=$1
+  local operation=$1 status=1
   shift
+  unset PROXYCODE_LOCK_FD PROXYCODE_LEGACY_LOCK_FD
   proxycode_init_paths || return
   mkdir -p "${PROXYCODE_RUNTIME_DIR%/*}" || return 1
   exec {PROXYCODE_LOCK_FD}<"${PROXYCODE_RUNTIME_DIR%/*}" || return 1
-  flock -x "$PROXYCODE_LOCK_FD" || return 1
-  [[ -x $PROXYCODE_BIN_DIR/proxycode && -r $PROXYCODE_DATA_DIR/lib/proxycode.sh && -r $PROXYCODE_STATE_DIR/install ]] || {
+  if ! flock -x "$PROXYCODE_LOCK_FD"; then
+    status=1
+  elif [[ ! -x $PROXYCODE_BIN_DIR/proxycode || ! -r $PROXYCODE_DATA_DIR/lib/proxycode.sh || ! -r $PROXYCODE_STATE_DIR/install ]]; then
     proxycode_error 'Toolkit installation changed while waiting; rerun the installer'
-    return
-  }
-  mkdir -p "$PROXYCODE_RUNTIME_DIR" || return 1
-  exec {PROXYCODE_LEGACY_LOCK_FD}>"$PROXYCODE_RUNTIME_DIR/lifecycle.lock" || return 1
-  chmod 600 "$PROXYCODE_RUNTIME_DIR/lifecycle.lock" || return 1
-  flock -x "$PROXYCODE_LEGACY_LOCK_FD" || return 1
-  [[ -x $PROXYCODE_BIN_DIR/proxycode && -r $PROXYCODE_DATA_DIR/lib/proxycode.sh && -r $PROXYCODE_STATE_DIR/install ]] || {
+    status=$?
+  elif ! mkdir -p "$PROXYCODE_RUNTIME_DIR" ||
+    ! exec {PROXYCODE_LEGACY_LOCK_FD}>"$PROXYCODE_RUNTIME_DIR/lifecycle.lock" ||
+    ! chmod 600 "$PROXYCODE_RUNTIME_DIR/lifecycle.lock" ||
+    ! flock -x "$PROXYCODE_LEGACY_LOCK_FD"; then
+    status=1
+  elif [[ ! -x $PROXYCODE_BIN_DIR/proxycode || ! -r $PROXYCODE_DATA_DIR/lib/proxycode.sh || ! -r $PROXYCODE_STATE_DIR/install ]]; then
     proxycode_error 'Toolkit installation changed while waiting; rerun the installer'
-    return
-  }
-  proxycode_prepare_lifecycle || return
-  "$operation" "$@"
+    status=$?
+  elif proxycode_prepare_lifecycle; then
+    "$operation" "$@"
+    status=$?
+  fi
+  [[ -z ${PROXYCODE_LEGACY_LOCK_FD:-} ]] || exec {PROXYCODE_LEGACY_LOCK_FD}>&-
+  exec {PROXYCODE_LOCK_FD}>&-
+  return "$status"
 }
 
 proxycode_process_start_time() {
@@ -731,7 +786,7 @@ proxycode_switch_locked() {
   [[ -d $profile ]] || { proxycode_error "Tunnel Profile '$name' does not exist" 2; return; }
   proxycode_inspect_active || return
   if [[ $PROXYCODE_ACTIVE_STATUS == active && $PROXYCODE_ACTIVE_PROFILE != "$name" ]]; then
-    proxycode_confirm "$yes" "Switch from Tunnel Profile '$PROXYCODE_ACTIVE_PROFILE' to '$name'?" || return
+    proxycode_confirm "$yes" "Switch from Tunnel Profile '$PROXYCODE_ACTIVE_PROFILE' to '$name'? Existing Wrapped commands may lose connectivity." || return
     proxycode_stop_locked || return
   fi
   proxycode_start_locked "$name"

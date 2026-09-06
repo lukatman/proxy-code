@@ -4,10 +4,15 @@ set -u
 set -o pipefail
 umask 077
 
+PROXYCODE_VERSION=1.0.0
 WIREPROXY_VERSION=1.1.3
 WIREPROXY_AMD64_SHA256=e88c1d090740373fc606c1bafd81d9a5eadc642cce5667616e20e9d7a444f51c
 WIREPROXY_ARM64_SHA256=370e00bd2167960d1ecd1c3c1439715bbaa94a0a110a2040468670c9af6021b6
 WIREPROXY_RELEASE=https://github.com/windtf/wireproxy/releases/download/v1.1.3
+PROXYCODE_BUNDLE_ROOT=proxycode-$PROXYCODE_VERSION
+PROXYCODE_BUNDLE=$PROXYCODE_BUNDLE_ROOT.tar.gz
+PROXYCODE_RELEASE=https://github.com/lukatman/proxy-code/releases/download/v$PROXYCODE_VERSION
+original_arguments=("$@")
 
 die() {
   printf 'proxycode installer: %s\n' "$1" >&2
@@ -17,9 +22,19 @@ die() {
 usage() {
   cat <<'EOF'
 Usage:
+  ./install.sh
   ./install.sh --install-only [--wireproxy-bin FILE]
+  ./install.sh --wg-config FILE --name NAME [--default] [SETUP OPTIONS]
   ./install.sh --uninstall [--yes]
   ./install.sh --purge [--yes]
+
+Setup options:
+  --wireproxy-bin FILE
+  --http-port PORT
+  --probe cloudflare [--expect-location CC]
+  --probe mullvad [--expect-location NAME]
+  --probe custom --url HTTPS_URL --status CODE [--contains TEXT]
+  --replace [--yes]
 EOF
 }
 
@@ -34,37 +49,79 @@ version_is_newer() {
 
 mode=
 custom_binary=
+wg_config=
+name=
+http_port=
+probe=
+expectation=
+url=
+expected_status=
+contains=
+make_default=false
+replace=false
 yes=false
+had_arguments=false
+if (($#)); then had_arguments=true; fi
 while (($#)); do
   case $1 in
     --install-only|--uninstall|--purge)
       [[ -z $mode ]] || die 'choose exactly one of --install-only, --uninstall, or --purge' 2
       mode=${1#--}
       ;;
-    --wireproxy-bin)
-      (($# >= 2)) || die '--wireproxy-bin requires a file' 2
-      custom_binary=$2
+    --wireproxy-bin|--wg-config|--name|--http-port|--probe|--expect-location|--url|--status|--contains)
+      (($# >= 2)) || die "$1 requires a value" 2
+      case $1 in
+        --wireproxy-bin) custom_binary=$2 ;;
+        --wg-config) wg_config=$2 ;;
+        --name) name=$2 ;;
+        --http-port) http_port=$2 ;;
+        --probe) probe=$2 ;;
+        --expect-location) expectation=$2 ;;
+        --url) url=$2 ;;
+        --status) expected_status=$2 ;;
+        --contains) contains=$2 ;;
+      esac
       shift
       ;;
+    --default) make_default=true ;;
+    --replace) replace=true ;;
     --yes) yes=true ;;
     --help|-h) usage; exit 0 ;;
     *) die "unknown option '$1'" 2 ;;
   esac
   shift
 done
-[[ -n $mode ]] || die 'this release requires --install-only, --uninstall, or --purge' 2
-if [[ $mode == install-only ]]; then
-  $yes && die '--yes is only valid with --uninstall or --purge' 2
-else
-  [[ -z $custom_binary ]] || die '--wireproxy-bin is only valid with --install-only' 2
+if [[ -z $mode && ( -n $wg_config || -n $name ) ]]; then
+  mode=profile
 fi
+if [[ -z $mode ]] && $had_arguments; then
+  die 'choose --install-only or provide --wg-config FILE --name NAME' 2
+fi
+case $mode in
+  install-only)
+    if [[ -n ${wg_config}${name}${http_port}${probe}${expectation}${url}${expected_status}${contains} ]] || $make_default || $replace; then
+      die '--install-only cannot be combined with Profile setup options' 2
+    fi
+    $yes && die '--yes is only valid with replacement, uninstall, or purge' 2
+    ;;
+  profile)
+    [[ -n $wg_config && -n $name ]] || die '--wg-config and --name are required together' 2
+    $yes && ! $replace && die '--yes requires --replace for Profile setup' 2
+    ;;
+  uninstall|purge)
+    if [[ -n ${custom_binary}${wg_config}${name}${http_port}${probe}${expectation}${url}${expected_status}${contains} ]] || $make_default || $replace; then
+      die "--$mode cannot be combined with setup options" 2
+    fi
+    ;;
+  '') ;;
+esac
 
 if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
   die 'Bash 4.4 or newer is required'
 fi
 
 missing=()
-if [[ $mode == install-only ]]; then
+if [[ $mode == install-only || $mode == profile || -z $mode ]]; then
   required_commands=(curl flock tar sha256sum timeout mktemp readlink stat nohup awk grep sed)
 else
   required_commands=(flock readlink stat awk)
@@ -74,12 +131,52 @@ for command_name in "${required_commands[@]}"; do
 done
 ((${#missing[@]} == 0)) || die "missing required commands: ${missing[*]}. Install them with your distribution package manager."
 
-script_path=$(readlink -f "${BASH_SOURCE[0]}") || die 'cannot resolve installer path'
+script_path=$(readlink -f "${BASH_SOURCE[0]:-/dev/stdin}" 2>/dev/null) || script_path=
 source_root=${script_path%/*}
-[[ -r $source_root/lib/proxycode.sh && -r $source_root/bin/proxycode ]] || die 'source files are missing; run the installer from a complete release'
+if [[ ! -r $source_root/lib/proxycode.sh || ! -r $source_root/bin/proxycode ]]; then
+  if [[ -z $mode ]] && ! { exec {TERMINAL_CHECK_FD}<>/dev/tty; } 2>/dev/null; then
+    die 'no terminal is available; use complete setup flags such as --install-only or --wg-config FILE --name NAME' 2
+  fi
+  [[ -z ${TERMINAL_CHECK_FD:-} ]] || exec {TERMINAL_CHECK_FD}>&-
+  bootstrap_dir=$(mktemp -d "${TMPDIR:-/tmp}/proxycode-bootstrap.XXXXXX") || die 'cannot create private bootstrap directory'
+  bootstrap_cleanup() { rm -rf -- "$bootstrap_dir"; }
+  trap bootstrap_cleanup EXIT
+  curl --proto '=https' --tlsv1.2 -fL --retry 2 -o "$bootstrap_dir/$PROXYCODE_BUNDLE" "$PROXYCODE_RELEASE/$PROXYCODE_BUNDLE" || die 'Toolkit bundle download failed'
+  curl --proto '=https' --tlsv1.2 -fL --retry 2 -o "$bootstrap_dir/$PROXYCODE_BUNDLE.sha256" "$PROXYCODE_RELEASE/$PROXYCODE_BUNDLE.sha256" || die 'Toolkit checksum download failed'
+  grep -Eq "^[0-9a-f]{64}  $PROXYCODE_BUNDLE$" "$bootstrap_dir/$PROXYCODE_BUNDLE.sha256" || die 'Toolkit checksum file is invalid'
+  (cd "$bootstrap_dir" && sha256sum -c "$PROXYCODE_BUNDLE.sha256" >/dev/null) || die 'Toolkit bundle checksum mismatch'
+  members=$(tar -tzf "$bootstrap_dir/$PROXYCODE_BUNDLE") || die 'Toolkit bundle is unreadable'
+  while IFS= read -r member; do
+    case $member in
+      "$PROXYCODE_BUNDLE_ROOT/"|"$PROXYCODE_BUNDLE_ROOT/install.sh"|"$PROXYCODE_BUNDLE_ROOT/bin/"|"$PROXYCODE_BUNDLE_ROOT/bin/proxycode"|"$PROXYCODE_BUNDLE_ROOT/lib/"|"$PROXYCODE_BUNDLE_ROOT/lib/proxycode.sh"|"$PROXYCODE_BUNDLE_ROOT/README.md"|"$PROXYCODE_BUNDLE_ROOT/LICENSE") ;;
+      *) die 'Toolkit bundle contains unsafe or unexpected members' ;;
+    esac
+  done <<<"$members"
+  for member in "$PROXYCODE_BUNDLE_ROOT/install.sh" "$PROXYCODE_BUNDLE_ROOT/bin/proxycode" "$PROXYCODE_BUNDLE_ROOT/lib/proxycode.sh"; do
+    grep -Fxq "$member" <<<"$members" || die 'Toolkit bundle is incomplete'
+  done
+  tar -xzf "$bootstrap_dir/$PROXYCODE_BUNDLE" -C "$bootstrap_dir" || die 'Toolkit bundle extraction failed'
+  for member in install.sh bin/proxycode lib/proxycode.sh; do
+    [[ -f $bootstrap_dir/$PROXYCODE_BUNDLE_ROOT/$member && ! -L $bootstrap_dir/$PROXYCODE_BUNDLE_ROOT/$member ]] || die 'Toolkit bundle contains invalid source files'
+  done
+  bash "$bootstrap_dir/$PROXYCODE_BUNDLE_ROOT/install.sh" "${original_arguments[@]}"
+  bootstrap_status=$?
+  bootstrap_cleanup
+  trap - EXIT
+  exit "$bootstrap_status"
+fi
 # shellcheck source=lib/proxycode.sh
 source "$source_root/lib/proxycode.sh"
 proxycode_init_paths || exit 1
+live_home=$HOME
+live_xdg_config=${XDG_CONFIG_HOME:-}
+live_xdg_data=${XDG_DATA_HOME:-}
+live_xdg_state=${XDG_STATE_HOME:-}
+live_xdg_runtime=${XDG_RUNTIME_DIR:-}
+live_config_dir=$PROXYCODE_CONFIG_DIR
+live_data_dir=$PROXYCODE_DATA_DIR
+live_state_dir=$PROXYCODE_STATE_DIR
+live_runtime_dir=$PROXYCODE_RUNTIME_DIR
 
 acquire_lifecycle_lock() {
   mkdir -p "${PROXYCODE_RUNTIME_DIR%/*}" || die 'cannot create the lifecycle lock directory'
@@ -94,7 +191,7 @@ acquire_lifecycle_lock() {
   fi
 }
 
-if [[ $mode != install-only ]]; then
+if [[ $mode == uninstall || $mode == purge ]]; then
   acquire_lifecycle_lock
   proxycode_inspect_active || die 'cannot inspect lifecycle state'
   if [[ $PROXYCODE_ACTIVE_STATUS == ambiguous ]]; then
@@ -126,6 +223,90 @@ if [[ $mode != install-only ]]; then
     printf 'Uninstalled the Toolkit; Tunnel Profiles, Proxy credentials, and settings were preserved.\n'
   fi
   exit 0
+fi
+
+interactive=false
+start_after=false
+if [[ -z $mode ]]; then
+  if [[ -x $PROXYCODE_BIN_DIR/proxycode && -r $PROXYCODE_STATE_DIR/install ]]; then
+    printf 'Existing installation found; reinstalling without changing Profiles or settings.\n'
+    mode=install-only
+  else
+    if ! exec 0<>/dev/tty 1>/dev/tty; then
+      die 'no terminal is available; use --install-only or provide --wg-config FILE --name NAME' 2
+    fi
+    interactive=true
+    printf '◆ ProxyCode  setup\n\n'
+    proxycode_choose 'What would you like to do?' \
+      'Install and set up a Tunnel Profile' \
+      'Install Toolkit only' \
+      'Cancel' || exit 2
+    case $PROXYCODE_CHOICE in
+      2) mode=install-only ;;
+      3) printf 'Cancelled. No changes were made.\n'; exit 0 ;;
+      *) mode=profile ;;
+    esac
+
+    if [[ $mode == profile ]]; then
+      proxycode_choose 'Do you have a WireGuard configuration?' \
+        'Yes — choose the file' \
+        "No — Mullvad recommended" \
+        'Install Toolkit only' || exit 2
+      case $PROXYCODE_CHOICE in
+        2)
+          printf 'Generate and download a standard WireGuard configuration from:\nhttps://mullvad.net/en/account/wireguard-config\n\n'
+          ;;
+        3) mode=install-only ;;
+      esac
+    fi
+
+    if [[ $mode == profile ]]; then
+      proxycode_prompt 'WireGuard configuration file' || exit 2
+      wg_config=$PROXYCODE_ANSWER
+      suggested_name=$(proxycode_suggest_profile_name "$wg_config")
+      proxycode_prompt 'Tunnel Profile name' "$suggested_name" || exit 2
+      name=$PROXYCODE_ANSWER
+      proxycode_choose "Make '$name' the Default Tunnel Profile?" 'Yes' 'No' || exit 2
+      [[ $PROXYCODE_CHOICE == 1 ]] && make_default=true
+      proxycode_choose 'Start and check this Profile after installation?' 'Yes' 'No' || exit 2
+      [[ $PROXYCODE_CHOICE == 1 ]] && start_after=true
+      proxycode_choose 'Configure advanced settings?' 'Use settled defaults' 'Configure advanced settings' || exit 2
+      if [[ $PROXYCODE_CHOICE == 2 ]]; then
+        proxycode_choose 'WireProxy source' 'Pinned WireProxy v1.1.3' 'Custom executable' || exit 2
+        if [[ $PROXYCODE_CHOICE == 2 ]]; then
+          proxycode_prompt 'Custom WireProxy executable' || exit 2
+          custom_binary=$PROXYCODE_ANSWER
+        fi
+        proxycode_prompt 'HTTP listener port' 25345 || exit 2
+        http_port=$PROXYCODE_ANSWER
+        proxycode_choose 'Health probe' 'Cloudflare' 'Mullvad' 'Custom HTTPS URL' || exit 2
+        case $PROXYCODE_CHOICE in
+          1)
+            probe=cloudflare
+            proxycode_prompt 'Expected country code, or blank for any' || exit 2
+            expectation=$PROXYCODE_ANSWER
+            ;;
+          2)
+            probe=mullvad
+            proxycode_prompt 'Expected location, or blank for any' || exit 2
+            expectation=$PROXYCODE_ANSWER
+            ;;
+          3)
+            probe=custom
+            proxycode_prompt 'HTTPS probe URL' || exit 2; url=$PROXYCODE_ANSWER
+            proxycode_prompt 'Expected HTTP status' 200 || exit 2; expected_status=$PROXYCODE_ANSWER
+            proxycode_prompt 'Required response text, or blank for any' || exit 2; contains=$PROXYCODE_ANSWER
+            ;;
+        esac
+      fi
+    else
+      proxycode_choose 'WireProxy source' 'Pinned WireProxy v1.1.3' 'Custom executable' || exit 2
+      if [[ $PROXYCODE_CHOICE == 2 ]]; then
+        proxycode_prompt 'Custom WireProxy executable' || exit 2
+        custom_binary=$PROXYCODE_ANSWER
+      fi
+    fi
+  fi
 fi
 
 os=$(uname -s)
@@ -270,6 +451,82 @@ if $installation_present; then
   fi
 fi
 
+replacing_profile=false
+if [[ $mode == profile ]]; then
+  proxycode_validate_profile_name "$name" || die "invalid Tunnel Profile name '$name'" 2
+  [[ -f $wg_config && -r $wg_config ]] || die "cannot read WireGuard configuration '$wg_config'" 2
+  source_file=$(readlink -f "$wg_config") || die 'cannot resolve the WireGuard configuration' 2
+  for managed_root in "$live_config_dir" "$live_data_dir" "$live_state_dir" "$live_runtime_dir"; do
+    managed_root=$(readlink -m "$managed_root") || die 'cannot resolve a Toolkit directory'
+    case $source_file in
+      "$managed_root"|"$managed_root"/*) die 'the original WireGuard configuration must be outside Toolkit-managed directories' 2 ;;
+    esac
+  done
+  live_profile=$live_data_dir/profiles/$name
+  if [[ -e $live_profile ]]; then
+    replacing_profile=true
+    $replace || die "Tunnel Profile '$name' already exists; use --replace" 2
+  fi
+
+  export HOME=$work_dir/setup/home
+  export XDG_CONFIG_HOME=$work_dir/setup/config XDG_DATA_HOME=$work_dir/setup/data XDG_STATE_HOME=$work_dir/setup/state XDG_RUNTIME_DIR=$work_dir/setup/runtime
+  mkdir -p "$HOME" "$XDG_RUNTIME_DIR" || die 'cannot prepare Profile staging'
+  proxycode_init_paths || die 'cannot initialize Profile staging'
+  proxycode_prepare_storage || die 'cannot prepare Profile staging'
+  mkdir -p "$PROXYCODE_DATA_DIR/bin" "$PROXYCODE_STATE_DIR" "$PROXYCODE_RUNTIME_DIR" || die 'cannot prepare Profile staging'
+  chmod 700 "$PROXYCODE_DATA_DIR/bin" "$PROXYCODE_STATE_DIR" "$PROXYCODE_RUNTIME_DIR" || die 'cannot secure Profile staging'
+  cp -- "$work_dir/payload/wireproxy" "$PROXYCODE_DATA_DIR/bin/wireproxy" || die 'cannot stage WireProxy for Profile validation'
+  if [[ -r $live_config_dir/settings ]]; then
+    cp -- "$live_config_dir/settings" "$PROXYCODE_CONFIG_DIR/settings" || die 'cannot stage listener settings'
+  fi
+  if [[ -d $live_profile ]]; then
+    cp -R -- "$live_profile" "$PROXYCODE_DATA_DIR/profiles/$name" || die 'cannot stage the existing Tunnel Profile'
+  fi
+  [[ -z $http_port ]] || proxycode_settings_update "$http_port" >/dev/null || die 'invalid HTTP listener settings' 2
+  proxycode_profile_import "$source_file" "$name" "$make_default" "$replace" true >/dev/null || die 'WireGuard configuration validation failed'
+  if [[ -n $probe ]]; then
+    proxycode_profile_settings_update "$name" "$probe" "$expectation" "$url" "$expected_status" "$contains" >/dev/null || die 'invalid probe settings' 2
+  elif [[ -n $expectation$url$expected_status$contains ]]; then
+    die '--expect-location, --url, --status, and --contains require --probe' 2
+  fi
+  setup_profile=$PROXYCODE_DATA_DIR/profiles/$name
+  setup_settings=$PROXYCODE_CONFIG_DIR/settings
+  review_http_port=$(proxycode_read_setting "$PROXYCODE_CONFIG_DIR/settings" HTTP_PORT)
+  review_default_profile=$(proxycode_read_setting "$PROXYCODE_CONFIG_DIR/settings" DEFAULT_PROFILE)
+  review_probe=$(proxycode_read_setting "$setup_profile/settings" PROBE)
+  review_expectation=$(proxycode_read_setting "$setup_profile/settings" EXPECT_LOCATION)
+  review_url=$(proxycode_read_setting "$setup_profile/settings" URL)
+  review_status=$(proxycode_read_setting "$setup_profile/settings" STATUS)
+  review_contains=$(proxycode_read_setting "$setup_profile/settings" CONTAINS)
+  export HOME=$live_home XDG_CONFIG_HOME=$live_xdg_config XDG_DATA_HOME=$live_xdg_data XDG_STATE_HOME=$live_xdg_state XDG_RUNTIME_DIR=$live_xdg_runtime
+  proxycode_init_paths || exit 1
+fi
+
+printf 'Review installation:\n'
+printf '  Mode: %s\n' "$([[ $mode == profile ]] && printf 'install and set up a Tunnel Profile' || printf 'install only')"
+printf '  WireProxy: %s v%s\n' "$wireproxy_source" "$installed_wireproxy_version"
+[[ $wireproxy_source != custom ]] || printf '  WireProxy executable: %s\n' "$custom_binary"
+if [[ $mode == profile ]]; then
+  [[ $review_default_profile == "$name" ]] && review_default=yes || review_default=no
+  $start_after && review_start=yes || review_start=no
+  printf '  WireGuard configuration: %s\n  Profile: %s\n  Default: %s\n  Start and check: %s\n  HTTP port: %s\n  Probe: %s\n' \
+    "$source_file" "$name" "$review_default" "$review_start" "$review_http_port" "$review_probe"
+  case $review_probe in
+    cloudflare|mullvad) printf '  Expected location: %s\n' "${review_expectation:-any}" ;;
+    custom)
+      printf '  Probe URL: %s\n  Expected status: %s\n  Required response text: %s\n' \
+        "$review_url" "$review_status" "${review_contains:-any}"
+      ;;
+  esac
+fi
+if $interactive && ! proxycode_confirm false 'Install these changes?'; then
+  printf 'Cancelled. No changes were made.\n'
+  exit 0
+fi
+if $replacing_profile && ! $interactive; then
+  proxycode_confirm "$yes" "Replace Tunnel Profile '$name'?" || exit
+fi
+
 directories=(
   "$PROXYCODE_BIN_DIR"
   "$PROXYCODE_CONFIG_DIR"
@@ -285,16 +542,28 @@ sources=(
   "$work_dir/payload/proxycode.sh"
   "$work_dir/payload/wireproxy.LICENSE"
   "$work_dir/payload/proxycode"
-  "$work_dir/payload/install"
 )
 targets=(
   "$PROXYCODE_DATA_DIR/bin/wireproxy"
   "$PROXYCODE_DATA_DIR/lib/proxycode.sh"
   "$PROXYCODE_DATA_DIR/licenses/wireproxy.LICENSE"
   "$PROXYCODE_BIN_DIR/proxycode"
-  "$PROXYCODE_STATE_DIR/install"
 )
-modes=(700 600 600 700 600)
+modes=(700 600 600 700)
+if [[ $mode == profile ]]; then
+  directories+=("$PROXYCODE_DATA_DIR/profiles/$name")
+  for profile_file in wireguard.conf wireproxy.conf settings proxy-credential; do
+    sources+=("$setup_profile/$profile_file")
+    targets+=("$PROXYCODE_DATA_DIR/profiles/$name/$profile_file")
+    modes+=(600)
+  done
+  sources+=("$setup_settings")
+  targets+=("$PROXYCODE_CONFIG_DIR/settings")
+  modes+=(600)
+fi
+sources+=("$work_dir/payload/install")
+targets+=("$PROXYCODE_STATE_DIR/install")
+modes+=(600)
 new_directories=()
 temporaries=()
 existed=()
@@ -352,7 +621,18 @@ commit_complete=true
 
 printf 'Installed proxycode %s.\n' "$PROXYCODE_VERSION"
 printf 'Installed %s WireProxy v%s.\n' "$wireproxy_source" "$installed_wireproxy_version"
+if [[ $mode == profile ]]; then
+  $replacing_profile && printf 'Replaced Tunnel Profile: %s\n' "$name" || printf 'Imported Tunnel Profile: %s\n' "$name"
+  $make_default && printf 'Default Tunnel Profile: %s\n' "$name"
+fi
 case :$PATH: in
   *:"$PROXYCODE_BIN_DIR":*) ;;
   *) printf 'Add proxycode to PATH: export PATH="$HOME/.local/bin:$PATH"\n' ;;
 esac
+if $start_after; then
+  [[ -z ${INSTALL_LEGACY_LOCK_FD:-} ]] || exec {INSTALL_LEGACY_LOCK_FD}>&-
+  exec {INSTALL_LOCK_FD}>&-
+  proxycode_with_lifecycle_lock proxycode_start_locked "$name" || exit
+elif [[ $mode == install-only ]] && { [[ ! -d $PROXYCODE_DATA_DIR/profiles ]] || ! compgen -G "$PROXYCODE_DATA_DIR/profiles/*" >/dev/null; }; then
+  printf 'No Tunnel Profile configured. Resume with: proxycode profile import FILE --name NAME [--default]\n'
+fi

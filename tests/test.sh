@@ -7,6 +7,7 @@ SYSTEM_PATH=$PATH
 TESTS=0
 FAILURES=0
 TEST_HOMES=()
+DOWN=$'\033[B'
 
 cleanup_tests() {
   local directory
@@ -47,6 +48,9 @@ new_home() {
   export XDG_DATA_HOME=$TEST_HOME/data
   export XDG_STATE_HOME=$TEST_HOME/state
   export XDG_RUNTIME_DIR=$TEST_HOME/runtime
+  unset EXPECTED_PROXY_URL EXPECTED_WIREPROXY_EXE FAKE_CURL_BODY FAKE_CURL_CALLS FAKE_CURL_DELAY
+  unset FAKE_CURL_EXIT FAKE_CURL_FAIL_EXIT FAKE_CURL_FAILS FAKE_CURL_STATUS FAKE_READLINK_EXE
+  unset WIREPROXY_CONFIGTEST_FAIL WIREPROXY_PROFILE_CONFIGTEST_FAIL WIREPROXY_START_LOG
   mkdir -p "$HOME" "$XDG_RUNTIME_DIR"
 }
 
@@ -68,9 +72,11 @@ case \${1:-} in
   --version) printf 'wireproxy v${version}\\n' ;;
   --help) printf '%s\\n' 'Usage: wireproxy --config FILE [--configtest]' ;;
   --config)
+    config=\$2
     for argument in "\$@"; do
       if [[ \$argument == --configtest ]]; then
         [[ -n \${WIREPROXY_CONFIGTEST_FAIL:-} ]] && { printf 'PrivateKey = must-not-print\\n' >&2; exit 1; }
+        [[ -n \${WIREPROXY_PROFILE_CONFIGTEST_FAIL:-} && \$config != *compatibility.conf ]] && exit 1
         printf 'Config OK\\n'
         exit
       fi
@@ -83,6 +89,18 @@ case \${1:-} in
 esac
 EOF
   chmod 700 "$target"
+}
+
+run_tty() {
+  local input=$1 character index
+  shift
+  for ((index = 0; index < ${#input}; index++)); do
+    character=${input:index:1}
+    printf '%s' "$character"
+    if [[ $character == $'\n' || $character == B ]]; then
+      sleep 0.05
+    fi
+  done | script -qec "$(printf '%q ' "$@")" /dev/null
 }
 
 install_custom_binary() {
@@ -122,7 +140,7 @@ for ((index = 1; index <= $#; index++)); do
     [[ ${!next} == 65536 ]] && saw_limit=true
   fi
 done
-[[ ${https_proxy:-} == "$EXPECTED_PROXY_URL" && ${HTTPS_PROXY:-} == "$EXPECTED_PROXY_URL" ]] || exit 90
+[[ -z ${EXPECTED_PROXY_URL:-} || ${https_proxy:-} == "$EXPECTED_PROXY_URL" && ${HTTPS_PROXY:-} == "$EXPECTED_PROXY_URL" ]] || exit 90
 [[ -n $output ]] || exit 91
 $saw_limit || exit 92
 [[ -z ${FAKE_CURL_DELAY:-} ]] || sleep "$FAKE_CURL_DELAY"
@@ -1204,6 +1222,232 @@ test_missing_dependencies_change_nothing() {
   [[ ! -e $XDG_DATA_HOME/proxycode ]] || fail 'missing dependencies write no Toolkit data'
 }
 
+test_scripted_profile_setup() {
+  TESTS=$((TESTS + 1))
+  new_home
+  local source=$TEST_HOME/source/work.conf binary=$TEST_HOME/custom/wireproxy cli output status
+  write_wireguard_config "$source"
+  fake_wireproxy "$binary"
+
+  output=$(bash "$ROOT/install.sh" --wg-config "$source" --name work --default \
+    --wireproxy-bin "$binary" --http-port 31080 --probe custom \
+    --url https://example.test/health --status 204 --contains ready) || {
+    fail 'complete scripted Profile setup succeeds'; return;
+  }
+  cli=$HOME/.local/bin/proxycode
+  [[ $output == *'Review installation:'* && $output == *'Profile: work'* ]] || fail 'scripted setup prints one review'
+  assert_eq $'Name: work\nDefault: yes\nProbe: custom\nURL: https://example.test/health\nStatus: 204\nContains: configured' "$($cli profile show work)" 'scripted setup stores Profile choices'
+  assert_eq 'HTTP port: 31080' "$($cli settings)" 'scripted setup stores listener choice'
+  assert_eq $'Default: work\nActive: none\nProfiles: work\nProcess: stopped' "$($cli status)" 'scripted setup leaves the Profile stopped'
+
+  output=$(bash "$ROOT/install.sh" --wg-config "$source" --name work --replace --yes --wireproxy-bin "$binary") || {
+    fail 'scripted replacement succeeds'; return;
+  }
+  [[ $output == *'Default: yes'* && $output == *'Probe URL: https://example.test/health'* && $output == *'Expected status: 204'* && $output == *'Required response text: ready'* ]] || fail 'replacement review shows preserved resulting settings'
+
+  new_home
+  write_wireguard_config "$TEST_HOME/source/work.conf"
+  fake_wireproxy "$TEST_HOME/custom/wireproxy"
+  output=$(bash "$ROOT/install.sh" --wg-config "$TEST_HOME/source/work.conf" --wireproxy-bin "$TEST_HOME/custom/wireproxy" 2>&1)
+  status=$?
+  assert_eq 2 "$status" 'incomplete scripted setup status'
+  [[ $output == *'--wg-config and --name are required together'* ]] || fail 'incomplete scripted setup is explained'
+  [[ ! -e $XDG_DATA_HOME/proxycode ]] || fail 'incomplete scripted setup changes data'
+
+  new_home
+  source=$TEST_HOME/source/minimal.conf
+  binary=$TEST_HOME/custom/wireproxy
+  write_wireguard_config "$source"
+  fake_wireproxy "$binary"
+  bash "$ROOT/install.sh" --wg-config "$source" --name minimal --wireproxy-bin "$binary" >/dev/null || {
+    fail 'minimal scripted Profile setup succeeds'; return;
+  }
+  cli=$HOME/.local/bin/proxycode
+  assert_eq $'Name: minimal\nDefault: no\nProbe: cloudflare\nExpected location: any' "$($cli profile show minimal)" 'minimal setup uses settled Profile defaults'
+  assert_eq 'HTTP port: 25345' "$($cli settings)" 'minimal setup uses the settled listener default'
+}
+
+test_setup_validation_preserves_installation() {
+  TESTS=$((TESTS + 1))
+  new_home
+  install_custom_binary >/dev/null || { fail 'setup rollback baseline succeeds'; return; }
+  local source=$TEST_HOME/source/rejected.conf before output status
+  write_wireguard_config "$source"
+  before=$(installation_digest)
+
+  output=$(WIREPROXY_PROFILE_CONFIGTEST_FAIL=1 bash "$ROOT/install.sh" --wg-config "$source" --name rejected \
+    --wireproxy-bin "$TEST_HOME/custom/wireproxy" 2>&1)
+  status=$?
+  assert_eq 1 "$status" 'staged Profile validation failure status'
+  [[ $output == *'WireGuard configuration validation failed'* ]] || fail 'staged Profile failure is explained'
+  assert_eq "$before" "$(installation_digest)" 'staged Profile failure changes the installation'
+  [[ ! -e $XDG_DATA_HOME/proxycode/profiles/rejected ]] || fail 'staged Profile failure leaves a Profile'
+}
+
+test_interactive_setup_cancel_and_activation_failure() {
+  TESTS=$((TESTS + 1))
+  new_home
+  local output status source=$TEST_HOME/source/work.conf binary=$TEST_HOME/custom/wireproxy
+
+  output=$(run_tty "$DOWN$DOWN
+" bash "$ROOT/install.sh")
+  status=$?
+  assert_eq 0 "$status" 'interactive cancellation status'
+  [[ $output == *'Cancelled. No changes were made.'* ]] || fail 'interactive cancellation is not reported'
+  [[ ! -e $XDG_DATA_HOME/proxycode ]] || fail 'interactive cancellation changes data'
+
+  write_wireguard_config "$source"
+  fake_wireproxy "$binary"
+  output=$(run_tty "
+
+$source
+
+
+$DOWN
+$DOWN
+$DOWN
+$binary
+
+
+
+n
+" bash "$ROOT/install.sh")
+  status=$?
+  assert_eq 0 "$status" 'final review cancellation status'
+  [[ $output == *'Review installation:'* && $output == *'Cancelled. No changes were made.'* ]] || fail 'final review cancellation is not reported'
+  [[ ! -e $XDG_DATA_HOME/proxycode ]] || fail 'final review cancellation commits staged changes'
+
+  new_home
+  source=$TEST_HOME/source/work.conf
+  binary=$TEST_HOME/custom/wireproxy
+  write_wireguard_config "$source"
+  fake_wireproxy "$binary"
+  install_lifecycle_fakes
+  export EXPECTED_WIREPROXY_EXE=$XDG_DATA_HOME/proxycode/bin/wireproxy
+  export FAKE_CURL_CALLS=$TEST_HOME/curl-calls FAKE_CURL_FAILS=1 FAKE_CURL_FAIL_EXIT=1
+  PATH=$TEST_HOME/lifecycle-fakes:$SYSTEM_PATH
+  output=$(run_tty "
+
+$source
+
+
+
+$DOWN
+$DOWN
+$binary
+
+
+
+y
+" bash "$ROOT/install.sh" 2>&1)
+  status=$?
+  assert_eq 1 "$status" 'interactive activation failure status'
+  [[ $output == *'Mullvad recommended'* && $output == *'Review installation:'* ]] || fail 'interactive setup omits reviewed provider-neutral guidance'
+  [[ $output == *'health check failed'* && $output == *"retry 'proxycode start work'"* ]] || fail 'interactive activation failure lacks recovery guidance'
+  assert_eq 1 "$(<"$FAKE_CURL_CALLS")" 'interactive activation failure reaches the intended health probe'
+  [[ -d $XDG_DATA_HOME/proxycode/profiles/work ]] || fail 'activation failure loses the imported Profile'
+  [[ ! -e $XDG_RUNTIME_DIR/proxycode/active ]] || fail 'activation failure leaves the Profile active'
+}
+
+test_interactive_management_dispatch() {
+  TESTS=$((TESTS + 1))
+  new_home
+  install_custom_binary >/dev/null || { fail 'interactive management install succeeds'; return; }
+  local cli=$HOME/.local/bin/proxycode source=$TEST_HOME/source/work.conf output status
+  write_wireguard_config "$source"
+
+  output=$($cli </dev/null 2>&1)
+  status=$?
+  assert_eq 2 "$status" 'non-terminal no-argument management status'
+  [[ $output == Usage:* ]] || fail 'non-terminal management does not print usage'
+
+  output=$(run_tty "
+$source
+
+
+$DOWN$DOWN$DOWN$DOWN$DOWN$DOWN$DOWN$DOWN
+" "$cli")
+  [[ $output == *'Default: none'* && $output == *'Import a Tunnel Profile'* ]] || fail 'management menu omits state or settled actions'
+  [[ $output == *'Imported Tunnel Profile: work'* ]] || fail 'management menu does not dispatch Profile import'
+  assert_eq 'work' "$($cli profile list)" 'management import persists the Profile'
+  assert_eq 'work' "$(sed -n 's/^DEFAULT_PROFILE=//p' "$XDG_CONFIG_HOME/proxycode/settings")" 'management import selects Default when requested'
+
+  output=$(run_tty $'\033[B\n' bash -c 'source "$1"; proxycode_choose "Pick one" One Two; printf "choice=%s\n" "$PROXYCODE_CHOICE"' _ "$XDG_DATA_HOME/proxycode/lib/proxycode.sh")
+  [[ $output == *'choice=2'* ]] || fail 'chooser down arrow does not move immediately'
+}
+
+test_lifecycle_lock_cleanup_after_failure() {
+  TESTS=$((TESTS + 1))
+  new_home
+  install_custom_binary >/dev/null || { fail 'lock cleanup install succeeds'; return; }
+  printf 'HTTP_PORT=invalid\nDEFAULT_PROFILE=\n' >"$XDG_CONFIG_HOME/proxycode/settings"
+
+  local status
+  timeout 2 bash -c '
+    source "$1"
+    proxycode_with_lifecycle_lock proxycode_status_locked >/dev/null 2>&1 || true
+    proxycode_with_lifecycle_lock proxycode_status_locked >/dev/null 2>&1
+  ' _ "$XDG_DATA_HOME/proxycode/lib/proxycode.sh"
+  status=$?
+  assert_eq 1 "$status" 'failed lifecycle preparation releases its locks'
+}
+
+test_piped_bootstrap() {
+  TESTS=$((TESTS + 1))
+  new_home
+  local release=$TEST_HOME/release/proxycode-1.0.0 bundle=$TEST_HOME/proxycode-1.0.0.tar.gz output status
+  mkdir -p "$release/bin" "$release/lib" "$TEST_HOME/bootstrap-fakes"
+  cat >"$release/install.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >"$BOOTSTRAP_ARGS"
+printf 'bundle installer ran\n'
+EOF
+  printf '# bundled command\n' >"$release/bin/proxycode"
+  printf '# bundled library\n' >"$release/lib/proxycode.sh"
+  tar -czf "$bundle" -C "$TEST_HOME/release" proxycode-1.0.0
+  (cd "$TEST_HOME" && sha256sum proxycode-1.0.0.tar.gz >proxycode-1.0.0.tar.gz.sha256)
+  cat >"$TEST_HOME/bootstrap-fakes/curl" <<'EOF'
+#!/usr/bin/env bash
+for ((index = 1; index <= $#; index++)); do
+  if [[ ${!index} == -o ]]; then next=$((index + 1)); output=${!next}; fi
+done
+url=${!#}
+printf '%s\n' "$url" >>"$BOOTSTRAP_URLS"
+cp "$BOOTSTRAP_SOURCE/${url##*/}" "$output"
+EOF
+  chmod 700 "$TEST_HOME/bootstrap-fakes/curl"
+  export BOOTSTRAP_ARGS=$TEST_HOME/bootstrap-args BOOTSTRAP_URLS=$TEST_HOME/bootstrap-urls BOOTSTRAP_SOURCE=$TEST_HOME
+
+  output=$(cat "$ROOT/install.sh" | PATH=$TEST_HOME/bootstrap-fakes:$SYSTEM_PATH bash -s -- --install-only --wireproxy-bin "$TEST_HOME/a binary") || {
+    fail 'complete piped bootstrap succeeds'; return;
+  }
+  [[ $output == *'bundle installer ran'* ]] || fail 'piped bootstrap does not run the verified bundle installer'
+  assert_eq $'--install-only\n--wireproxy-bin\n'"$TEST_HOME/a binary" "$(<"$BOOTSTRAP_ARGS")" 'piped bootstrap preserves argv'
+  assert_eq $'https://github.com/lukatman/proxy-code/releases/download/v1.0.0/proxycode-1.0.0.tar.gz\nhttps://github.com/lukatman/proxy-code/releases/download/v1.0.0/proxycode-1.0.0.tar.gz.sha256' "$(<"$BOOTSTRAP_URLS")" 'piped bootstrap uses fixed release assets'
+
+  rm -f "$BOOTSTRAP_URLS"
+  output=$(cat "$ROOT/install.sh" | PATH=$TEST_HOME/bootstrap-fakes:$SYSTEM_PATH bash -s 2>&1)
+  status=$?
+  assert_eq 2 "$status" 'non-terminal piped setup status'
+  [[ $output == *'complete setup flags'* ]] || fail 'non-terminal piped setup lacks complete-flags guidance'
+  [[ ! -e $BOOTSTRAP_URLS ]] || fail 'incomplete piped setup downloads a bundle'
+
+  cp "$ROOT/install.sh" "$release/install.sh"
+  cp "$ROOT/bin/proxycode" "$release/bin/proxycode"
+  cp "$ROOT/lib/proxycode.sh" "$release/lib/proxycode.sh"
+  tar -czf "$bundle" -C "$TEST_HOME/release" proxycode-1.0.0
+  (cd "$TEST_HOME" && sha256sum proxycode-1.0.0.tar.gz >proxycode-1.0.0.tar.gz.sha256)
+  fake_wireproxy "$TEST_HOME/custom/wireproxy"
+  output=$(run_tty "$DOWN
+$DOWN
+$TEST_HOME/custom/wireproxy
+y
+" env PATH="$TEST_HOME/bootstrap-fakes:$SYSTEM_PATH" bash -c "cat '$ROOT/install.sh' | bash") || {
+    fail 'piped interactive setup succeeds'; return;
+  }
+  [[ $output == *'◆ ProxyCode  setup'* && $output == *'Installed custom WireProxy v1.1.3.'* ]] || fail 'piped installer does not prompt on the terminal'
+}
+
 test_custom_install_and_cli
 test_profile_import_default_and_show
 test_profile_replacement_and_validation_rollback
@@ -1232,6 +1476,12 @@ test_uninstall_preserves_profiles_nested_under_logs
 test_invalid_install_and_runtime_residue_cleanup
 test_unsupported_platform_changes_nothing
 test_missing_dependencies_change_nothing
+test_scripted_profile_setup
+test_setup_validation_preserves_installation
+test_interactive_setup_cancel_and_activation_failure
+test_interactive_management_dispatch
+test_lifecycle_lock_cleanup_after_failure
+test_piped_bootstrap
 
 if ((FAILURES)); then
   printf '%d of %d tests failed\n' "$FAILURES" "$TESTS" >&2
