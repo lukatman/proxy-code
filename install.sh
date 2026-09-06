@@ -228,13 +228,13 @@ fi
 interactive=false
 start_after=false
 if [[ -z $mode ]]; then
-  if [[ -x $PROXYCODE_BIN_DIR/proxycode && -r $PROXYCODE_STATE_DIR/install ]]; then
+  if ! exec 0<>/dev/tty 1>/dev/tty; then
+    if [[ ! -x $PROXYCODE_BIN_DIR/proxycode || ! -r $PROXYCODE_STATE_DIR/install ]]; then
+      die 'no terminal is available; use --install-only or provide --wg-config FILE --name NAME' 2
+    fi
     printf 'Existing installation found; reinstalling without changing Profiles or settings.\n'
     mode=install-only
   else
-    if ! exec 0<>/dev/tty 1>/dev/tty; then
-      die 'no terminal is available; use --install-only or provide --wg-config FILE --name NAME' 2
-    fi
     interactive=true
     printf '\033[?25l\n%s%s◆ ProxyCode%s  setup\n\n' "$PROXYCODE_PURPLE" "$PROXYCODE_BOLD" "$PROXYCODE_RESET"
     trap 'printf "\033[?25h"' EXIT

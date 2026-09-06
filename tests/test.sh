@@ -1290,7 +1290,7 @@ test_setup_validation_preserves_installation() {
 test_interactive_setup_cancel_and_activation_failure() {
   TESTS=$((TESTS + 1))
   new_home
-  local output status review_heading source=$TEST_HOME/source/work.conf binary=$TEST_HOME/custom/wireproxy
+  local before output status review_heading source=$TEST_HOME/source/work.conf binary=$TEST_HOME/custom/wireproxy
 
   output=$(run_tty "$DOWN$DOWN
 " bash "$ROOT/install.sh")
@@ -1304,6 +1304,15 @@ test_interactive_setup_cancel_and_activation_failure() {
   [[ $output == *$'\033[?25l'* && $output == *$'\033[?25h'* ]] || fail 'interactive setup does not hide and restore the native cursor'
   [[ ! -e $XDG_DATA_HOME/proxycode ]] || fail 'interactive cancellation changes data'
 
+  install_custom_binary >/dev/null || { fail 'interactive reinstall baseline succeeds'; return; }
+  before=$(installation_digest)
+  make_release_fakes x86_64
+  output=$(run_tty "$DOWN$DOWN
+" bash "$ROOT/install.sh")
+  [[ $output == *'◆ ProxyCode'*setup* && $output == *'Cancelled. No changes were made.'* ]] || fail 'no-option terminal reinstall bypasses interactive setup'
+  assert_eq "$before" "$(installation_digest)" 'interactive reinstall cancellation changes the installation'
+
+  new_home
   source=$HOME/work.conf
   write_wireguard_config "$source"
   fake_wireproxy "$binary"
@@ -1386,6 +1395,7 @@ $DOWN$DOWN$DOWN$DOWN$DOWN$DOWN$DOWN$DOWN
 " "$cli")
   [[ $output == *'Default: none'* && $output == *'Import a Tunnel Profile'* ]] || fail 'management menu omits state or settled actions'
   [[ $output == *'Imported Tunnel Profile: travel'* ]] || fail 'management menu does not replace the suggested Profile name'
+  assert_eq 1 "$(grep -ao '◆ ProxyCode' <<<"$output" | wc -l)" 'management repeats its heading after an action'
   assert_eq 'travel' "$($cli profile list)" 'management import persists the Profile'
   assert_eq 'travel' "$(sed -n 's/^DEFAULT_PROFILE=//p' "$XDG_CONFIG_HOME/proxycode/settings")" 'management import selects Default when requested'
 
