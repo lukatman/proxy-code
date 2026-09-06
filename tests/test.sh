@@ -1300,6 +1300,7 @@ test_interactive_setup_cancel_and_activation_failure() {
   [[ $output == *$'\033[38;2;167;139;250m\033[1m◆ ProxyCode\033[0m  setup'* ]] || fail 'interactive setup heading does not use the approved purple'
   [[ $output == *$'\033[38;2;103;232;249m?\033[0m What would you like to do?'* ]] || fail 'interactive setup question does not use the approved cyan accent'
   [[ $output == *$'\033[38;2;167;139;250m❯ Cancel\033[0m'* ]] || fail 'interactive setup does not use the approved selection cursor'
+  [[ $output == *'↑↓ move, enter confirm'* ]] || fail 'interactive setup omits menu navigation guidance'
   [[ $output == *$'\033[38;2;134;239;172m◇\033[0m What would you like to do?'*$'\033[38;2;134;239;172mCancel\033[0m'* ]] || fail 'interactive setup does not preserve the selected answer as a Clack trail'
   [[ $output == *$'\033[?25l'* && $output == *$'\033[?25h'* ]] || fail 'interactive setup does not hide and restore the native cursor'
   [[ ! -e $XDG_DATA_HOME/proxycode ]] || fail 'interactive cancellation changes data'
@@ -1433,6 +1434,7 @@ $DOWN$DOWN$DOWN$DOWN$DOWN$DOWN$DOWN$DOWN
 " "$cli")
   [[ $output == *'Default: none'* && $output == *'Import a Tunnel Profile'* ]] || fail 'management menu omits state or settled actions'
   [[ $output == *$'\033[38;2;167;139;250m>\033[0m \033[38;2;103;232;249m\033[7mt\033[0m\033[38;2;113;113;122mype to filter\033[0m'* ]] || fail 'management filter placeholder does not begin under the block cursor'
+  [[ $output == *'↑↓ move, enter confirm'* ]] || fail 'management filter omits menu navigation guidance'
   [[ $output == *'Imported Tunnel Profile: travel'* ]] || fail 'management menu does not replace the suggested Profile name'
   assert_eq 1 "$(grep -ao '◆ ProxyCode' <<<"$output" | wc -l)" 'management repeats its heading after an action'
   assert_eq 'travel' "$($cli profile list)" 'management import persists the Profile'

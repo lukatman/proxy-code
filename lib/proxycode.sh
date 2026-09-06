@@ -118,11 +118,12 @@ proxycode_choose() {
       indent='  '
       printf '%s◆%s %s\n  %s>%s ' "$PROXYCODE_CYAN" "$PROXYCODE_RESET" "$prompt" "$PROXYCODE_PURPLE" "$PROXYCODE_RESET"
       if [[ -n $query ]]; then
-        printf '%s%s█%s\n\n' "$query" "$PROXYCODE_CYAN" "$PROXYCODE_RESET"
+        printf '%s%s█%s\n' "$query" "$PROXYCODE_CYAN" "$PROXYCODE_RESET"
       else
-        printf '%s\033[7mt%s%sype to filter%s\n\n' "$PROXYCODE_CYAN" "$PROXYCODE_RESET" "$PROXYCODE_MUTED" "$PROXYCODE_RESET"
+        printf '%s\033[7mt%s%sype to filter%s\n' "$PROXYCODE_CYAN" "$PROXYCODE_RESET" "$PROXYCODE_MUTED" "$PROXYCODE_RESET"
       fi
-      rendered_lines=3
+      printf '  %s↑↓ move, enter confirm%s\n\n' "$PROXYCODE_MUTED" "$PROXYCODE_RESET"
+      rendered_lines=4
     else
       printf '%s?%s %s\n' "$PROXYCODE_CYAN" "$PROXYCODE_RESET" "$prompt"
       rendered_lines=1
@@ -141,6 +142,10 @@ proxycode_choose() {
       fi
       rendered_lines=$((rendered_lines + 1))
     done
+    if ! $filter; then
+      printf '%s  ↑↓ move, enter confirm%s\n' "$PROXYCODE_MUTED" "$PROXYCODE_RESET"
+      rendered_lines=$((rendered_lines + 1))
+    fi
     IFS= read -rsN1 key || return 1
     case $key in
       $'\n'|$'\r')
