@@ -262,11 +262,32 @@ if [[ -z $mode ]]; then
     fi
 
     if [[ $mode == profile ]]; then
-      proxycode_prompt 'WireGuard configuration file' '' 'enter here' || exit 2
-      wg_config=${PROXYCODE_ANSWER/#\~/$HOME}
+      while :; do
+        proxycode_prompt 'WireGuard configuration file' '' 'enter here' || exit 2
+        wg_config=${PROXYCODE_ANSWER/#\~/$HOME}
+        [[ -f $wg_config && -r $wg_config ]] && break
+        proxycode_error "cannot read WireGuard configuration '$wg_config'" 2
+      done
       suggested_name=$(proxycode_suggest_profile_name "$wg_config")
-      proxycode_prompt 'Tunnel Profile name' "$suggested_name" || exit 2
-      name=$PROXYCODE_ANSWER
+      while :; do
+        proxycode_prompt 'Tunnel Profile name' "$suggested_name" || exit 2
+        name=$PROXYCODE_ANSWER
+        if ! proxycode_validate_profile_name "$name"; then
+          proxycode_error "invalid Tunnel Profile name '$name'" 2
+          suggested_name=
+          continue
+        fi
+        [[ -e $PROXYCODE_DATA_DIR/profiles/$name ]] || break
+        proxycode_choose "Tunnel Profile '$name' already exists" \
+          'Choose another name' \
+          'Replace existing Profile' \
+          'Cancel' || exit 2
+        case $PROXYCODE_CHOICE in
+          1) suggested_name= ;;
+          2) replace=true; break ;;
+          3) printf 'Cancelled. No changes were made.\n'; exit 0 ;;
+        esac
+      done
       proxycode_choose "Make '$name' the Default Tunnel Profile?" 'Yes' 'No' || exit 2
       [[ $PROXYCODE_CHOICE == 1 ]] && make_default=true
       proxycode_choose 'Start and check this Profile after installation?' 'Yes' 'No' || exit 2

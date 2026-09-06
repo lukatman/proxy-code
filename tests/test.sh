@@ -1375,6 +1375,38 @@ $binary
   [[ ! -e $XDG_RUNTIME_DIR/proxycode/active ]] || fail 'activation failure leaves the Profile active'
 }
 
+test_interactive_setup_rejects_early_and_resolves_profile_collision() {
+  TESTS=$((TESTS + 1))
+  new_home
+  local binary=$TEST_HOME/custom/wireproxy cli input output profile source=$HOME/work.conf credential
+  write_wireguard_config "$source"
+  fake_wireproxy "$binary"
+  bash "$ROOT/install.sh" --wg-config "$source" --name work --default --wireproxy-bin "$binary" >/dev/null || {
+    fail 'interactive collision baseline install succeeds'; return;
+  }
+  cli=$HOME/.local/bin/proxycode
+  profile=$XDG_DATA_HOME/proxycode/profiles/work
+  credential=$(<"$profile/proxy-credential")
+  bash "$ROOT/install.sh" --uninstall --yes >/dev/null || { fail 'interactive collision baseline uninstall succeeds'; return; }
+  make_release_fakes x86_64
+
+  input=$'\n\nmissing.conf\n'"$source"$'\n\n'"$DOWN$DOWN"$'\n'
+  output=$(run_tty "$input" bash "$ROOT/install.sh")
+  [[ $output == *"cannot read WireGuard configuration 'missing.conf'"* ]] || fail 'unreadable interactive WireGuard path is not reported immediately'
+  (($(grep -ao 'WireGuard configuration file' <<<"$output" | wc -l) > 1)) || fail 'interactive setup does not retry an unreadable WireGuard path'
+  [[ $output == *"Tunnel Profile 'work' already exists"* && $output == *'Replace existing Profile'* && $output == *'Cancelled. No changes were made.'* ]] || fail 'interactive collision cannot be cancelled before acquisition'
+  [[ ! -e $CURL_URL_LOG && ! -x $cli ]] || fail 'cancelled interactive collision downloads or installs files'
+
+  input=$'\n\n'"$source"$'\n\n'"$DOWN"$'\n\n'"$DOWN"$'\n\n\n'
+  output=$(run_tty "$input" bash "$ROOT/install.sh") || { fail 'confirmed interactive replacement succeeds'; return; }
+  [[ $output == *'Replaced Tunnel Profile: work'* && -x $cli ]] || fail 'confirmed interactive replacement does not complete installation'
+  assert_eq "$credential" "$(<"$profile/proxy-credential")" 'interactive replacement changes the Proxy credential'
+
+  input=$'\n\n'"$source"$'\n\n\ntravel\n\n'"$DOWN"$'\n\n\n'
+  output=$(run_tty "$input" bash "$ROOT/install.sh") || { fail 'interactive alternate Profile name succeeds'; return; }
+  [[ $output == *'Imported Tunnel Profile: travel'* && -d $XDG_DATA_HOME/proxycode/profiles/travel ]] || fail 'interactive collision cannot choose another Profile name'
+}
+
 test_interactive_management_dispatch() {
   TESTS=$((TESTS + 1))
   new_home
@@ -1531,6 +1563,7 @@ test_missing_dependencies_change_nothing
 test_scripted_profile_setup
 test_setup_validation_preserves_installation
 test_interactive_setup_cancel_and_activation_failure
+test_interactive_setup_rejects_early_and_resolves_profile_collision
 test_interactive_management_dispatch
 test_lifecycle_lock_cleanup_after_failure
 test_piped_bootstrap
