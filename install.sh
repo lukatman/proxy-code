@@ -236,7 +236,7 @@ if [[ -z $mode ]]; then
       die 'no terminal is available; use --install-only or provide --wg-config FILE --name NAME' 2
     fi
     interactive=true
-    printf '\n%s◆ ProxyCode%s  setup\n\n' "$PROXYCODE_PURPLE" "$PROXYCODE_RESET"
+    printf '\n%s%s◆ ProxyCode%s  setup\n\n' "$PROXYCODE_PURPLE" "$PROXYCODE_BOLD" "$PROXYCODE_RESET"
     proxycode_choose 'What would you like to do?' \
       'Install and set up a Tunnel Profile' \
       'Install Toolkit only' \
@@ -502,7 +502,11 @@ if [[ $mode == profile ]]; then
   proxycode_init_paths || exit 1
 fi
 
-printf 'Review installation:\n'
+if $interactive; then
+  printf '\n%s%s◆ ProxyCode%s  review\n\n' "$PROXYCODE_PURPLE" "$PROXYCODE_BOLD" "$PROXYCODE_RESET"
+else
+  printf 'Review installation:\n'
+fi
 printf '  Mode: %s\n' "$([[ $mode == profile ]] && printf 'install and set up a Tunnel Profile' || printf 'install only')"
 printf '  WireProxy: %s v%s\n' "$wireproxy_source" "$installed_wireproxy_version"
 [[ $wireproxy_source != custom ]] || printf '  WireProxy executable: %s\n' "$custom_binary"
@@ -519,9 +523,26 @@ if [[ $mode == profile ]]; then
       ;;
   esac
 fi
-if $interactive && ! proxycode_confirm false 'Install these changes?'; then
-  printf 'Cancelled. No changes were made.\n'
-  exit 0
+if $interactive; then
+  printf '\n%s◇ Ready to install%s\n\n%s[Enter] install  ·  [R] restart%s\n' \
+    "$PROXYCODE_GREEN" "$PROXYCODE_RESET" "$PROXYCODE_MUTED" "$PROXYCODE_RESET"
+  review_confirmed=false
+  while IFS= read -rsN1 review_key; do
+    case $review_key in
+      $'\n'|$'\r') review_confirmed=true; break ;;
+      r|R)
+        [[ -z ${INSTALL_LEGACY_LOCK_FD:-} ]] || exec {INSTALL_LEGACY_LOCK_FD}>&-
+        exec {INSTALL_LOCK_FD}>&-
+        cleanup
+        exec bash "$script_path"
+        die 'could not restart setup'
+        ;;
+    esac
+  done
+  if ! $review_confirmed; then
+    printf 'Cancelled. No changes were made.\n'
+    exit 0
+  fi
 fi
 if $replacing_profile && ! $interactive; then
   proxycode_confirm "$yes" "Replace Tunnel Profile '$name'?" || exit

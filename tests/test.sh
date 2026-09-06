@@ -8,6 +8,8 @@ TESTS=0
 FAILURES=0
 TEST_HOMES=()
 DOWN=$'\033[B'
+ESCAPE=$'\033'
+BACKSPACE=$'\177'
 
 cleanup_tests() {
   local directory
@@ -96,6 +98,7 @@ run_tty() {
   shift
   for ((index = 0; index < ${#input}; index++)); do
     character=${input:index:1}
+    [[ $character == "$BACKSPACE" ]] && sleep 0.05
     printf '%s' "$character"
     if [[ $character == $'\n' || $character == B ]]; then
       sleep 0.05
@@ -1287,16 +1290,17 @@ test_setup_validation_preserves_installation() {
 test_interactive_setup_cancel_and_activation_failure() {
   TESTS=$((TESTS + 1))
   new_home
-  local output status source=$TEST_HOME/source/work.conf binary=$TEST_HOME/custom/wireproxy
+  local output status review_heading source=$TEST_HOME/source/work.conf binary=$TEST_HOME/custom/wireproxy
 
   output=$(run_tty "$DOWN$DOWN
 " bash "$ROOT/install.sh")
   status=$?
   assert_eq 0 "$status" 'interactive cancellation status'
   [[ $output == *'Cancelled. No changes were made.'* ]] || fail 'interactive cancellation is not reported'
-  [[ $output == *$'\033[38;5;141m◆ ProxyCode\033[0m  setup'* ]] || fail 'interactive setup heading is not purple'
-  [[ $output == *$'\033[38;5;214m?\033[0m What would you like to do?'* ]] || fail 'interactive setup question mark is not orange'
-  [[ $output == *$'Cancel\033[0m\r\n\r\nCancelled. No changes were made.'* ]] || fail 'interactive selection is not followed by a blank line'
+  [[ $output == *$'\033[38;2;167;139;250m\033[1m◆ ProxyCode\033[0m  setup'* ]] || fail 'interactive setup heading does not use the approved purple'
+  [[ $output == *$'\033[38;2;103;232;249m?\033[0m What would you like to do?'* ]] || fail 'interactive setup question does not use the approved cyan accent'
+  [[ $output == *$'\033[38;2;167;139;250m❯ Cancel\033[0m'* ]] || fail 'interactive setup does not use the approved selection cursor'
+  [[ $output == *$'\033[38;2;134;239;172m◇\033[0m What would you like to do?'*$'\033[38;2;134;239;172mCancel\033[0m'* ]] || fail 'interactive setup does not preserve the selected answer as a Clack trail'
   [[ ! -e $XDG_DATA_HOME/proxycode ]] || fail 'interactive cancellation changes data'
 
   write_wireguard_config "$source"
@@ -1313,11 +1317,17 @@ $binary
 
 
 
-n
+r$DOWN
+$DOWN
+$binary
+r$DOWN$DOWN
 " bash "$ROOT/install.sh")
   status=$?
-  assert_eq 0 "$status" 'final review cancellation status'
-  [[ $output == *'Review installation:'* && $output == *'Cancelled. No changes were made.'* ]] || fail 'final review cancellation is not reported'
+  assert_eq 0 "$status" 'final review restart and cancellation status'
+  [[ $output == *$'◆ ProxyCode\033[0m  review'* && $output == *'[Enter] install  ·  [R] restart'* ]] || fail 'interactive review does not match the approved controls'
+  review_heading=$'◆ ProxyCode\033[0m  review'
+  [[ $output == *"$review_heading"*"$review_heading"* ]] || fail 'restarted setup does not reach a second review'
+  [[ $output == *'Cancelled. No changes were made.'* ]] || fail 'restarted setup cannot be cancelled safely'
   [[ ! -e $XDG_DATA_HOME/proxycode ]] || fail 'final review cancellation commits staged changes'
 
   new_home
@@ -1341,11 +1351,11 @@ $binary
 
 
 
-y
+
 " bash "$ROOT/install.sh" 2>&1)
   status=$?
   assert_eq 1 "$status" 'interactive activation failure status'
-  [[ $output == *'Mullvad recommended'* && $output == *'Review installation:'* ]] || fail 'interactive setup omits reviewed provider-neutral guidance'
+  [[ $output == *'Mullvad recommended'* && $output == *$'◆ ProxyCode\033[0m  review'* ]] || fail 'interactive setup omits reviewed provider-neutral guidance'
   [[ $output == *'health check failed'* && $output == *"retry 'proxycode start work'"* ]] || fail 'interactive activation failure lacks recovery guidance'
   assert_eq 1 "$(<"$FAKE_CURL_CALLS")" 'interactive activation failure reaches the intended health probe'
   [[ -d $XDG_DATA_HOME/proxycode/profiles/work ]] || fail 'activation failure loses the imported Profile'
@@ -1366,17 +1376,40 @@ test_interactive_management_dispatch() {
 
   output=$(run_tty "
 $source
-
+travel
 
 $DOWN$DOWN$DOWN$DOWN$DOWN$DOWN$DOWN$DOWN
 " "$cli")
   [[ $output == *'Default: none'* && $output == *'Import a Tunnel Profile'* ]] || fail 'management menu omits state or settled actions'
-  [[ $output == *'Imported Tunnel Profile: work'* ]] || fail 'management menu does not dispatch Profile import'
-  assert_eq 'work' "$($cli profile list)" 'management import persists the Profile'
-  assert_eq 'work' "$(sed -n 's/^DEFAULT_PROFILE=//p' "$XDG_CONFIG_HOME/proxycode/settings")" 'management import selects Default when requested'
+  [[ $output == *'Imported Tunnel Profile: travel'* ]] || fail 'management menu does not replace the suggested Profile name'
+  assert_eq 'travel' "$($cli profile list)" 'management import persists the Profile'
+  assert_eq 'travel' "$(sed -n 's/^DEFAULT_PROFILE=//p' "$XDG_CONFIG_HOME/proxycode/settings")" 'management import selects Default when requested'
 
   output=$(run_tty $'\033[B\n' bash -c 'source "$1"; proxycode_choose "Pick one" One Two; printf "choice=%s\n" "$PROXYCODE_CHOICE"' _ "$XDG_DATA_HOME/proxycode/lib/proxycode.sh")
   [[ $output == *'choice=2'* ]] || fail 'chooser down arrow does not move immediately'
+
+  output=$(run_tty "old${ESCAPE}new
+" bash -c 'source "$1"; proxycode_prompt "Name" work; printf "answer=%s\n" "$PROXYCODE_ANSWER"' _ "$XDG_DATA_HOME/proxycode/lib/proxycode.sh")
+  [[ $output == *'answer=new'* ]] || fail 'Escape followed by typing does not reset the current text question'
+
+  output=$(run_tty "*${BACKSPACE}sett
+$DOWN$DOWN
+exit
+" "$cli")
+  [[ $output == *'No matches'* ]] || fail 'management filter treats glob characters as patterns'
+  [[ $output == *$'\033[38;2;103;232;249m◆\033[0m Choose an action'* && $output == *'type to filter'* ]] || fail 'management action menu is not filterable'
+  [[ $output == *$'\033[38;2;167;139;250m  ❯ Settings\033[0m'* ]] || fail 'filtered management menu does not use the approved selection cursor'
+  [[ $output == *$'\033[38;2;134;239;172m◇\033[0m Choose an action'*Settings* ]] || fail 'management selection does not collapse into the Clack trail'
+
+  output=$(run_tty "check
+
+exit
+" "$cli")
+  [[ $output == *$'\033[38;2;167;139;250m>\033[0m check\033[38;2;103;232;249m▏'* ]] || fail 'management filter does not accept j and k as search text'
+
+  output=$(run_tty "se${ESCAPE}exit
+" "$cli")
+  [[ $output == *$'\033[38;2;134;239;172mExit\033[0m'* ]] || fail 'Escape followed by typing does not reset the management filter'
 }
 
 test_lifecycle_lock_cleanup_after_failure() {
@@ -1444,7 +1477,7 @@ EOF
   output=$(run_tty "$DOWN
 $DOWN
 $TEST_HOME/custom/wireproxy
-y
+
 " env PATH="$TEST_HOME/bootstrap-fakes:$SYSTEM_PATH" bash -c "cat '$ROOT/install.sh' | bash") || {
     fail 'piped interactive setup succeeds'; return;
   }

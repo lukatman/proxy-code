@@ -34,11 +34,7 @@ interactive_import() {
 }
 
 interactive_settings() {
-  local port probe expectation url status contains
-  expectation=
-  url=
-  status=
-  contains=
+  local port probe expectation='' url='' status='' contains=''
   proxycode_choose 'Settings' 'HTTP listener port' 'Tunnel Profile health probe' 'Back' || return 2
   case $PROXYCODE_CHOICE in
     1)
@@ -71,10 +67,10 @@ interactive_management() {
     return 2
   fi
   while :; do
-    printf '\n%s◆ ProxyCode%s  management\n\n' "$PROXYCODE_PURPLE" "$PROXYCODE_RESET"
+    printf '\n%s%s◆ ProxyCode%s  management\n\n' "$PROXYCODE_PURPLE" "$PROXYCODE_BOLD" "$PROXYCODE_RESET"
     proxycode_with_lifecycle_lock proxycode_status_locked || true
     printf '\n'
-    proxycode_choose 'Choose an action' \
+    proxycode_choose --filter 'Choose an action' \
       'Import a Tunnel Profile' \
       'Select the Default Profile' \
       'Start a Profile' \

@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 
 PROXYCODE_VERSION=1.0.0
-PROXYCODE_PURPLE=$'\033[38;5;141m'
-PROXYCODE_ORANGE=$'\033[38;5;214m'
+PROXYCODE_PURPLE=$'\033[38;2;167;139;250m'
+PROXYCODE_CYAN=$'\033[38;2;103;232;249m'
+PROXYCODE_GREEN=$'\033[38;2;134;239;172m'
+PROXYCODE_MUTED=$'\033[38;2;113;113;122m'
+PROXYCODE_BOLD=$'\033[1m'
 PROXYCODE_RESET=$'\033[0m'
 
 proxycode_init_paths() {
@@ -82,46 +85,129 @@ proxycode_error() {
   return "${2:-1}"
 }
 
+proxycode_menu_clear() {
+  printf '\033[%dA\r\033[J' "$1"
+}
+
+proxycode_trail() {
+  printf '%s◇%s %s\n%s│%s  %s%s%s\n%s│%s\n' \
+    "$PROXYCODE_GREEN" "$PROXYCODE_RESET" "$1" \
+    "$PROXYCODE_MUTED" "$PROXYCODE_RESET" "$PROXYCODE_GREEN" "$2" "$PROXYCODE_RESET" \
+    "$PROXYCODE_MUTED" "$PROXYCODE_RESET"
+}
+
 proxycode_choose() {
-  local prompt=$1 key rest number option selected=0
+  local filter=false prompt key rest number option indent='' selected=0 query='' rendered_lines=0 visible_count choice
+  local -a options visible_indexes
+  if [[ $1 == --filter ]]; then
+    filter=true
+    shift
+  fi
+  prompt=$1
   shift
+  options=("$@")
   while :; do
-    printf '%s?%s %s\n' "$PROXYCODE_ORANGE" "$PROXYCODE_RESET" "$prompt"
-    for ((number = 1; number <= $#; number++)); do
-      option=${!number}
-      if ((number - 1 == selected)); then
-        printf '\033[36m❯ %s\033[0m\n' "$option"
+    ((rendered_lines == 0)) || proxycode_menu_clear "$rendered_lines"
+    visible_indexes=()
+    for number in "${!options[@]}"; do
+      [[ -z $query || ${options[number],,} == *"${query,,}"* ]] && visible_indexes+=("$number")
+    done
+    visible_count=${#visible_indexes[@]}
+    ((selected < visible_count)) || selected=0
+    if $filter; then
+      indent='  '
+      printf '%s◆%s %s\n  %s>%s %s%s▏%s  %stype to filter%s\n\n' \
+        "$PROXYCODE_CYAN" "$PROXYCODE_RESET" "$prompt" \
+        "$PROXYCODE_PURPLE" "$PROXYCODE_RESET" "$query" "$PROXYCODE_CYAN" "$PROXYCODE_RESET" \
+        "$PROXYCODE_MUTED" "$PROXYCODE_RESET"
+      rendered_lines=3
+    else
+      printf '%s?%s %s\n' "$PROXYCODE_CYAN" "$PROXYCODE_RESET" "$prompt"
+      rendered_lines=1
+    fi
+    if ((visible_count == 0)); then
+      printf '  %sNo matches%s\n' "$PROXYCODE_CYAN" "$PROXYCODE_RESET"
+      rendered_lines=$((rendered_lines + 1))
+    fi
+    for ((number = 0; number < visible_count; number++)); do
+      choice=${visible_indexes[number]}
+      option=${options[choice]}
+      if ((number == selected)); then
+        printf '%s%s❯ %s%s\n' "$PROXYCODE_PURPLE" "$indent" "$option" "$PROXYCODE_RESET"
       else
-        printf '  %s\n' "$option"
+        printf '%s  %s\n' "$indent" "$option"
       fi
+      rendered_lines=$((rendered_lines + 1))
     done
     IFS= read -rsN1 key || return 1
     case $key in
-      $'\n'|$'\r') PROXYCODE_CHOICE=$((selected + 1)); printf '\n'; return ;;
-      $'\033')
-        IFS= read -rsN2 -t 0.2 rest || return 130
-        case $rest in
-          '[A') selected=$(((selected + $# - 1) % $#)) ;;
-          '[B') selected=$(((selected + 1) % $#)) ;;
-          *) return 130 ;;
-        esac
+      $'\n'|$'\r')
+        ((visible_count)) || continue
+        choice=${visible_indexes[selected]}
+        PROXYCODE_CHOICE=$((choice + 1))
+        proxycode_menu_clear "$rendered_lines"
+        proxycode_trail "$prompt" "${options[choice]}"
+        return
         ;;
-      k) selected=$(((selected + $# - 1) % $#)) ;;
-      j) selected=$(((selected + 1) % $#)) ;;
+      $'\033')
+        if ! IFS= read -rsN1 -t 0.2 rest; then
+          selected=0
+          query=
+          continue
+        fi
+        if [[ $rest == '[' ]] && IFS= read -rsN1 -t 0.2 rest; then
+          case $rest in
+            A) ((visible_count)) && selected=$(((selected + visible_count - 1) % visible_count)) ;;
+            B) ((visible_count)) && selected=$(((selected + 1) % visible_count)) ;;
+          esac
+        else
+          selected=0
+          query=
+          $filter && [[ $rest =~ ^[[:print:]]$ ]] && query=$rest
+        fi
+        ;;
+      $'\177'|$'\b')
+        if $filter; then query=${query%?}; selected=0; fi
+        ;;
+      *) $filter && [[ $key =~ ^[[:print:]]$ ]] && query+=$key && selected=0 ;;
     esac
-    printf '\033[%dA' "$(( $# + 1 ))"
   done
 }
 
 proxycode_prompt() {
-  local prompt=$1 default=${2:-} answer
-  if [[ -n $default ]]; then
-    printf '%s?%s %s [%s]: ' "$PROXYCODE_ORANGE" "$PROXYCODE_RESET" "$prompt" "$default"
-  else
-    printf '%s?%s %s: ' "$PROXYCODE_ORANGE" "$PROXYCODE_RESET" "$prompt"
-  fi
-  IFS= read -r answer || return 1
-  PROXYCODE_ANSWER=${answer:-$default}
+  local prompt=$1 default=${2:-} answer='' key rest rendered=false
+  while :; do
+    $rendered && proxycode_menu_clear 2
+    printf '%s?%s %s\n%s│%s  ' "$PROXYCODE_CYAN" "$PROXYCODE_RESET" "$prompt" "$PROXYCODE_MUTED" "$PROXYCODE_RESET"
+    if [[ -n $answer ]]; then
+      printf '%s%s▏%s' "$answer" "$PROXYCODE_CYAN" "$PROXYCODE_RESET"
+    elif [[ -n $default ]]; then
+      printf '%s%s%s' "$PROXYCODE_MUTED" "$default" "$PROXYCODE_RESET"
+    fi
+    printf '\n'
+    rendered=true
+    IFS= read -rsN1 key || return 1
+    case $key in
+      $'\n'|$'\r')
+        PROXYCODE_ANSWER=${answer:-$default}
+        proxycode_menu_clear 2
+        proxycode_trail "$prompt" "$PROXYCODE_ANSWER"
+        return
+        ;;
+      $'\033')
+        if ! IFS= read -rsN1 -t 0.2 rest; then
+          answer=
+        elif [[ $rest == '[' ]]; then
+          IFS= read -rsN1 -t 0.2 rest || answer=
+        else
+          answer=
+          [[ $rest =~ ^[[:print:]]$ ]] && answer=$rest
+        fi
+        ;;
+      $'\177'|$'\b') answer=${answer%?} ;;
+      *) [[ $key =~ ^[[:print:]]$ ]] && answer+=$key ;;
+    esac
+  done
 }
 
 proxycode_suggest_profile_name() {
