@@ -116,10 +116,12 @@ proxycode_choose() {
     ((selected < visible_count)) || selected=0
     if $filter; then
       indent='  '
-      printf '%s◆%s %s\n  %s>%s %s%s█%s  %stype to filter%s\n\n' \
-        "$PROXYCODE_CYAN" "$PROXYCODE_RESET" "$prompt" \
-        "$PROXYCODE_PURPLE" "$PROXYCODE_RESET" "$query" "$PROXYCODE_CYAN" "$PROXYCODE_RESET" \
-        "$PROXYCODE_MUTED" "$PROXYCODE_RESET"
+      printf '%s◆%s %s\n  %s>%s ' "$PROXYCODE_CYAN" "$PROXYCODE_RESET" "$prompt" "$PROXYCODE_PURPLE" "$PROXYCODE_RESET"
+      if [[ -n $query ]]; then
+        printf '%s%s█%s\n\n' "$query" "$PROXYCODE_CYAN" "$PROXYCODE_RESET"
+      else
+        printf '%s\033[7mt%s%sype to filter%s\n\n' "$PROXYCODE_CYAN" "$PROXYCODE_RESET" "$PROXYCODE_MUTED" "$PROXYCODE_RESET"
+      fi
       rendered_lines=3
     else
       printf '%s?%s %s\n' "$PROXYCODE_CYAN" "$PROXYCODE_RESET" "$prompt"

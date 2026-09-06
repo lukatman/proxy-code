@@ -256,6 +256,8 @@ if [[ -z $mode ]]; then
       case $PROXYCODE_CHOICE in
         2)
           printf 'Generate and download a standard WireGuard configuration from:\nhttps://mullvad.net/en/account/wireguard-config\n\n'
+          printf 'After downloading it, run the installer again.\n'
+          exit 0
           ;;
         3) mode=install-only ;;
       esac
