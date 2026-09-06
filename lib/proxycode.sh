@@ -116,7 +116,7 @@ proxycode_choose() {
     ((selected < visible_count)) || selected=0
     if $filter; then
       indent='  '
-      printf '%s◆%s %s\n  %s>%s %s%s▏%s  %stype to filter%s\n\n' \
+      printf '%s◆%s %s\n  %s>%s %s%s█%s  %stype to filter%s\n\n' \
         "$PROXYCODE_CYAN" "$PROXYCODE_RESET" "$prompt" \
         "$PROXYCODE_PURPLE" "$PROXYCODE_RESET" "$query" "$PROXYCODE_CYAN" "$PROXYCODE_RESET" \
         "$PROXYCODE_MUTED" "$PROXYCODE_RESET"
@@ -180,11 +180,14 @@ proxycode_prompt() {
     $rendered && proxycode_menu_clear 2
     printf '%s?%s %s\n%s│%s  ' "$PROXYCODE_CYAN" "$PROXYCODE_RESET" "$prompt" "$PROXYCODE_MUTED" "$PROXYCODE_RESET"
     if [[ -n $answer ]]; then
-      printf '%s' "$answer"
+      printf '%s%s█%s' "$answer" "$PROXYCODE_CYAN" "$PROXYCODE_RESET"
     elif [[ -n $placeholder ]]; then
-      printf '%s%s%s' "$PROXYCODE_MUTED" "$placeholder" "$PROXYCODE_RESET"
+      printf '%s\033[7m%s%s%s%s%s' "$PROXYCODE_CYAN" "${placeholder:0:1}" "$PROXYCODE_RESET" \
+        "$PROXYCODE_MUTED" "${placeholder:1}" "$PROXYCODE_RESET"
+    else
+      printf '%s█%s' "$PROXYCODE_CYAN" "$PROXYCODE_RESET"
     fi
-    printf '%s▏%s\n' "$PROXYCODE_CYAN" "$PROXYCODE_RESET"
+    printf '\n'
     rendered=true
     IFS= read -rsN1 key || return 1
     case $key in

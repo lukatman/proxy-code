@@ -1336,8 +1336,8 @@ r$DOWN$DOWN
   status=$?
   assert_eq 0 "$status" 'final review restart and cancellation status'
   [[ $output == *$'◆ ProxyCode\033[0m  review'* && $output == *'[Enter] install  ·  [R] restart'* ]] || fail 'interactive review does not match the approved controls'
-  [[ $output == *$'\033[38;2;113;113;122menter here\033[0m'* ]] || fail 'WireGuard configuration prompt does not show its grey hint'
-  [[ $output != *$'\033[38;2;103;232;249m▏\033[0m\033[38;2;103;232;249m▏\033[0m'* ]] || fail 'interactive text input renders two synthetic cursors'
+  [[ $output == *$'\033[38;2;103;232;249m\033[7me\033[0m\033[38;2;113;113;122mnter here\033[0m'* ]] || fail 'WireGuard configuration hint does not begin under the block cursor'
+  [[ $output != *'▏'* ]] || fail 'interactive text input still renders a thin cursor'
   review_heading=$'◆ ProxyCode\033[0m  review'
   [[ $output == *"$review_heading"*"$review_heading"* ]] || fail 'restarted setup does not reach a second review'
   [[ $output == *'Cancelled. No changes were made.'* ]] || fail 'restarted setup cannot be cancelled safely'
@@ -1405,6 +1405,7 @@ $DOWN$DOWN$DOWN$DOWN$DOWN$DOWN$DOWN$DOWN
   output=$(run_tty "old${ESCAPE}new
 " bash -c 'source "$1"; proxycode_prompt "Name" work; printf "answer=%s\n" "$PROXYCODE_ANSWER"' _ "$XDG_DATA_HOME/proxycode/lib/proxycode.sh")
   [[ $output == *'answer=new'* ]] || fail 'Escape followed by typing does not reset the current text question'
+  [[ $output == *$'\033[38;2;103;232;249m\033[7mw\033[0m\033[38;2;113;113;122mork\033[0m'* ]] || fail 'default text does not begin under the block cursor'
 
   output=$(run_tty "*${BACKSPACE}sett
 $DOWN$DOWN
@@ -1419,7 +1420,8 @@ exit
 
 exit
 " "$cli")
-  [[ $output == *$'\033[38;2;167;139;250m>\033[0m check\033[38;2;103;232;249m▏'* ]] || fail 'management filter does not accept j and k as search text'
+  [[ $output == *$'\033[38;2;167;139;250m>\033[0m check\033[38;2;103;232;249m█'* ]] || fail 'management filter does not accept j and k as search text'
+  [[ $output != *'▏'* ]] || fail 'management filter still renders a thin cursor'
 
   output=$(run_tty "se${ESCAPE}exit
 " "$cli")
