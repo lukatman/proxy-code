@@ -1301,13 +1301,15 @@ test_interactive_setup_cancel_and_activation_failure() {
   [[ $output == *$'\033[38;2;103;232;249m?\033[0m What would you like to do?'* ]] || fail 'interactive setup question does not use the approved cyan accent'
   [[ $output == *$'\033[38;2;167;139;250m❯ Cancel\033[0m'* ]] || fail 'interactive setup does not use the approved selection cursor'
   [[ $output == *$'\033[38;2;134;239;172m◇\033[0m What would you like to do?'*$'\033[38;2;134;239;172mCancel\033[0m'* ]] || fail 'interactive setup does not preserve the selected answer as a Clack trail'
+  [[ $output == *$'\033[?25l'* && $output == *$'\033[?25h'* ]] || fail 'interactive setup does not hide and restore the native cursor'
   [[ ! -e $XDG_DATA_HOME/proxycode ]] || fail 'interactive cancellation changes data'
 
+  source=$HOME/work.conf
   write_wireguard_config "$source"
   fake_wireproxy "$binary"
   output=$(run_tty "
 
-$source
+~/work.conf
 
 
 $DOWN
@@ -1325,6 +1327,8 @@ r$DOWN$DOWN
   status=$?
   assert_eq 0 "$status" 'final review restart and cancellation status'
   [[ $output == *$'◆ ProxyCode\033[0m  review'* && $output == *'[Enter] install  ·  [R] restart'* ]] || fail 'interactive review does not match the approved controls'
+  [[ $output == *$'\033[38;2;113;113;122menter here\033[0m'* ]] || fail 'WireGuard configuration prompt does not show its grey hint'
+  [[ $output != *$'\033[38;2;103;232;249m▏\033[0m\033[38;2;103;232;249m▏\033[0m'* ]] || fail 'interactive text input renders two synthetic cursors'
   review_heading=$'◆ ProxyCode\033[0m  review'
   [[ $output == *"$review_heading"*"$review_heading"* ]] || fail 'restarted setup does not reach a second review'
   [[ $output == *'Cancelled. No changes were made.'* ]] || fail 'restarted setup cannot be cancelled safely'

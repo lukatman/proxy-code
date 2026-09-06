@@ -236,7 +236,8 @@ if [[ -z $mode ]]; then
       die 'no terminal is available; use --install-only or provide --wg-config FILE --name NAME' 2
     fi
     interactive=true
-    printf '\n%s%s◆ ProxyCode%s  setup\n\n' "$PROXYCODE_PURPLE" "$PROXYCODE_BOLD" "$PROXYCODE_RESET"
+    printf '\033[?25l\n%s%s◆ ProxyCode%s  setup\n\n' "$PROXYCODE_PURPLE" "$PROXYCODE_BOLD" "$PROXYCODE_RESET"
+    trap 'printf "\033[?25h"' EXIT
     proxycode_choose 'What would you like to do?' \
       'Install and set up a Tunnel Profile' \
       'Install Toolkit only' \
@@ -261,8 +262,8 @@ if [[ -z $mode ]]; then
     fi
 
     if [[ $mode == profile ]]; then
-      proxycode_prompt 'WireGuard configuration file' || exit 2
-      wg_config=$PROXYCODE_ANSWER
+      proxycode_prompt 'WireGuard configuration file' '' 'enter here' || exit 2
+      wg_config=${PROXYCODE_ANSWER/#\~/$HOME}
       suggested_name=$(proxycode_suggest_profile_name "$wg_config")
       proxycode_prompt 'Tunnel Profile name' "$suggested_name" || exit 2
       name=$PROXYCODE_ANSWER
@@ -275,7 +276,7 @@ if [[ -z $mode ]]; then
         proxycode_choose 'WireProxy source' 'Pinned WireProxy v1.1.3' 'Custom executable' || exit 2
         if [[ $PROXYCODE_CHOICE == 2 ]]; then
           proxycode_prompt 'Custom WireProxy executable' || exit 2
-          custom_binary=$PROXYCODE_ANSWER
+          custom_binary=${PROXYCODE_ANSWER/#\~/$HOME}
         fi
         proxycode_prompt 'HTTP listener port' 25345 || exit 2
         http_port=$PROXYCODE_ANSWER
@@ -303,10 +304,14 @@ if [[ -z $mode ]]; then
       proxycode_choose 'WireProxy source' 'Pinned WireProxy v1.1.3' 'Custom executable' || exit 2
       if [[ $PROXYCODE_CHOICE == 2 ]]; then
         proxycode_prompt 'Custom WireProxy executable' || exit 2
-        custom_binary=$PROXYCODE_ANSWER
+        custom_binary=${PROXYCODE_ANSWER/#\~/$HOME}
       fi
     fi
   fi
+fi
+if $interactive; then
+  printf '\033[?25h'
+  trap - EXIT
 fi
 
 os=$(uname -s)
@@ -332,6 +337,7 @@ fi
 
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/proxycode-install.XXXXXX") || die 'cannot create private staging directory'
 cleanup() {
+  $interactive && printf '\033[?25h'
   [[ -n ${work_dir:-} && -d $work_dir ]] && rm -rf -- "$work_dir"
 }
 trap cleanup EXIT
@@ -503,7 +509,7 @@ if [[ $mode == profile ]]; then
 fi
 
 if $interactive; then
-  printf '\n%s%s◆ ProxyCode%s  review\n\n' "$PROXYCODE_PURPLE" "$PROXYCODE_BOLD" "$PROXYCODE_RESET"
+  printf '\033[?25l\n%s%s◆ ProxyCode%s  review\n\n' "$PROXYCODE_PURPLE" "$PROXYCODE_BOLD" "$PROXYCODE_RESET"
 else
   printf 'Review installation:\n'
 fi
@@ -529,8 +535,9 @@ if $interactive; then
   review_confirmed=false
   while IFS= read -rsN1 review_key; do
     case $review_key in
-      $'\n'|$'\r') review_confirmed=true; break ;;
+      $'\n'|$'\r') printf '\033[?25h'; review_confirmed=true; break ;;
       r|R)
+        printf '\033[?25h'
         [[ -z ${INSTALL_LEGACY_LOCK_FD:-} ]] || exec {INSTALL_LEGACY_LOCK_FD}>&-
         exec {INSTALL_LOCK_FD}>&-
         cleanup
@@ -540,6 +547,7 @@ if $interactive; then
     esac
   done
   if ! $review_confirmed; then
+    printf '\033[?25h'
     printf 'Cancelled. No changes were made.\n'
     exit 0
   fi

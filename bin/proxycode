@@ -21,8 +21,8 @@ choose_profile() {
 
 interactive_import() {
   local source_file name make_default=false replace=false profile
-  proxycode_prompt 'WireGuard configuration file' || return 2
-  source_file=$PROXYCODE_ANSWER
+  proxycode_prompt 'WireGuard configuration file' '' 'enter here' || return 2
+  source_file=${PROXYCODE_ANSWER/#\~/$HOME}
   proxycode_prompt 'Tunnel Profile name' "$(proxycode_suggest_profile_name "$source_file")" || return 2
   name=$PROXYCODE_ANSWER
   proxycode_choose "Make '$name' the Default Tunnel Profile?" 'Yes' 'No' || return 2
@@ -66,6 +66,8 @@ interactive_management() {
     proxycode_help >&2
     return 2
   fi
+  printf '\033[?25l'
+  trap 'printf "\033[?25h"' EXIT
   while :; do
     printf '\n%s%s◆ ProxyCode%s  management\n\n' "$PROXYCODE_PURPLE" "$PROXYCODE_BOLD" "$PROXYCODE_RESET"
     proxycode_with_lifecycle_lock proxycode_status_locked || true
@@ -93,7 +95,7 @@ interactive_management() {
         [[ $PROXYCODE_CHOICE == 2 ]] && proxycode_with_lifecycle_lock proxycode_check_locked
         ;;
       8) interactive_settings ;;
-      9) return 0 ;;
+      9) printf '\033[?25h'; trap - EXIT; return 0 ;;
     esac
   done
 }

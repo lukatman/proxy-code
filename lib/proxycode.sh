@@ -175,16 +175,16 @@ proxycode_choose() {
 }
 
 proxycode_prompt() {
-  local prompt=$1 default=${2:-} answer='' key rest rendered=false
+  local prompt=$1 default=${2:-} placeholder=${3:-${2:-}} answer='' key rest rendered=false
   while :; do
     $rendered && proxycode_menu_clear 2
     printf '%s?%s %s\n%s│%s  ' "$PROXYCODE_CYAN" "$PROXYCODE_RESET" "$prompt" "$PROXYCODE_MUTED" "$PROXYCODE_RESET"
     if [[ -n $answer ]]; then
-      printf '%s%s▏%s' "$answer" "$PROXYCODE_CYAN" "$PROXYCODE_RESET"
-    elif [[ -n $default ]]; then
-      printf '%s%s%s' "$PROXYCODE_MUTED" "$default" "$PROXYCODE_RESET"
+      printf '%s' "$answer"
+    elif [[ -n $placeholder ]]; then
+      printf '%s%s%s' "$PROXYCODE_MUTED" "$placeholder" "$PROXYCODE_RESET"
     fi
-    printf '\n'
+    printf '%s▏%s\n' "$PROXYCODE_CYAN" "$PROXYCODE_RESET"
     rendered=true
     IFS= read -rsN1 key || return 1
     case $key in
