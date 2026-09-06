@@ -71,7 +71,7 @@ interactive_management() {
     return 2
   fi
   while :; do
-    printf '◆ ProxyCode  management\n\n'
+    printf '\n%s◆ ProxyCode%s  management\n\n' "$PROXYCODE_PURPLE" "$PROXYCODE_RESET"
     proxycode_with_lifecycle_lock proxycode_status_locked || true
     printf '\n'
     proxycode_choose 'Choose an action' \
@@ -84,7 +84,6 @@ interactive_management() {
       'Status and health check' \
       'Settings' \
       'Exit' || return 2
-    printf '\n'
     case $PROXYCODE_CHOICE in
       1) interactive_import ;;
       2) choose_profile 'Choose the Default Tunnel Profile' && proxycode_profile_default "$PROXYCODE_SELECTED_PROFILE" ;;
@@ -100,7 +99,6 @@ interactive_management() {
       8) interactive_settings ;;
       9) return 0 ;;
     esac
-    printf '\n'
   done
 }
 

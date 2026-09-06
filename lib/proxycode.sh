@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 
 PROXYCODE_VERSION=1.0.0
+PROXYCODE_PURPLE=$'\033[38;5;141m'
+PROXYCODE_ORANGE=$'\033[38;5;214m'
+PROXYCODE_RESET=$'\033[0m'
 
 proxycode_init_paths() {
   local home_root config_root data_root state_root runtime_root
@@ -83,7 +86,7 @@ proxycode_choose() {
   local prompt=$1 key rest number option selected=0
   shift
   while :; do
-    printf '? %s\n' "$prompt"
+    printf '%s?%s %s\n' "$PROXYCODE_ORANGE" "$PROXYCODE_RESET" "$prompt"
     for ((number = 1; number <= $#; number++)); do
       option=${!number}
       if ((number - 1 == selected)); then
@@ -94,7 +97,7 @@ proxycode_choose() {
     done
     IFS= read -rsN1 key || return 1
     case $key in
-      $'\n'|$'\r') PROXYCODE_CHOICE=$((selected + 1)); return ;;
+      $'\n'|$'\r') PROXYCODE_CHOICE=$((selected + 1)); printf '\n'; return ;;
       $'\033')
         IFS= read -rsN2 -t 0.2 rest || return 130
         case $rest in
@@ -113,9 +116,9 @@ proxycode_choose() {
 proxycode_prompt() {
   local prompt=$1 default=${2:-} answer
   if [[ -n $default ]]; then
-    printf '? %s [%s]: ' "$prompt" "$default"
+    printf '%s?%s %s [%s]: ' "$PROXYCODE_ORANGE" "$PROXYCODE_RESET" "$prompt" "$default"
   else
-    printf '? %s: ' "$prompt"
+    printf '%s?%s %s: ' "$PROXYCODE_ORANGE" "$PROXYCODE_RESET" "$prompt"
   fi
   IFS= read -r answer || return 1
   PROXYCODE_ANSWER=${answer:-$default}

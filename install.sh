@@ -236,7 +236,7 @@ if [[ -z $mode ]]; then
       die 'no terminal is available; use --install-only or provide --wg-config FILE --name NAME' 2
     fi
     interactive=true
-    printf '◆ ProxyCode  setup\n\n'
+    printf '\n%s◆ ProxyCode%s  setup\n\n' "$PROXYCODE_PURPLE" "$PROXYCODE_RESET"
     proxycode_choose 'What would you like to do?' \
       'Install and set up a Tunnel Profile' \
       'Install Toolkit only' \

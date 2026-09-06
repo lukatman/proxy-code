@@ -1294,6 +1294,9 @@ test_interactive_setup_cancel_and_activation_failure() {
   status=$?
   assert_eq 0 "$status" 'interactive cancellation status'
   [[ $output == *'Cancelled. No changes were made.'* ]] || fail 'interactive cancellation is not reported'
+  [[ $output == *$'\033[38;5;141m◆ ProxyCode\033[0m  setup'* ]] || fail 'interactive setup heading is not purple'
+  [[ $output == *$'\033[38;5;214m?\033[0m What would you like to do?'* ]] || fail 'interactive setup question mark is not orange'
+  [[ $output == *$'Cancel\033[0m\r\n\r\nCancelled. No changes were made.'* ]] || fail 'interactive selection is not followed by a blank line'
   [[ ! -e $XDG_DATA_HOME/proxycode ]] || fail 'interactive cancellation changes data'
 
   write_wireguard_config "$source"
@@ -1445,7 +1448,7 @@ y
 " env PATH="$TEST_HOME/bootstrap-fakes:$SYSTEM_PATH" bash -c "cat '$ROOT/install.sh' | bash") || {
     fail 'piped interactive setup succeeds'; return;
   }
-  [[ $output == *'◆ ProxyCode  setup'* && $output == *'Installed custom WireProxy v1.1.3.'* ]] || fail 'piped installer does not prompt on the terminal'
+  [[ $output == *'◆ ProxyCode'*setup* && $output == *'Installed custom WireProxy v1.1.3.'* ]] || fail 'piped installer does not prompt on the terminal'
 }
 
 test_custom_install_and_cli
