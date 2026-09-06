@@ -10,6 +10,96 @@ fi
 # shellcheck source=../lib/proxycode.sh
 source "$library"
 
+choose_profile() {
+  local prompt=$1
+  local -a profiles
+  mapfile -t profiles < <(proxycode_profile_list)
+  ((${#profiles[@]})) || { proxycode_error 'no Tunnel Profiles are configured'; return 2; }
+  proxycode_choose "$prompt" "${profiles[@]}" || return
+  PROXYCODE_SELECTED_PROFILE=${profiles[PROXYCODE_CHOICE - 1]}
+}
+
+interactive_import() {
+  local source_file name make_default=false replace=false profile
+  proxycode_prompt 'WireGuard configuration file' '' 'enter here' || return 2
+  source_file=${PROXYCODE_ANSWER/#\~/$HOME}
+  proxycode_prompt 'Tunnel Profile name' "$(proxycode_suggest_profile_name "$source_file")" || return 2
+  name=$PROXYCODE_ANSWER
+  proxycode_choose "Make '$name' the Default Tunnel Profile?" 'Yes' 'No' || return 2
+  [[ $PROXYCODE_CHOICE == 1 ]] && make_default=true
+  proxycode_init_paths || return
+  profile=$(proxycode_profile_path "$name" 2>/dev/null) || { proxycode_error "invalid Tunnel Profile name '$name'" 2; return; }
+  [[ -d $profile ]] && replace=true
+  proxycode_with_lifecycle_lock proxycode_profile_import "$source_file" "$name" "$make_default" "$replace" false
+}
+
+interactive_settings() {
+  local port probe expectation='' url='' status='' contains=''
+  proxycode_choose 'Settings' 'HTTP listener port' 'Tunnel Profile health probe' 'Back' || return 2
+  case $PROXYCODE_CHOICE in
+    1)
+      proxycode_load_global_settings || return
+      proxycode_prompt 'HTTP listener port' "$PROXYCODE_HTTP_PORT" || return 2
+      port=$PROXYCODE_ANSWER
+      proxycode_with_lifecycle_lock proxycode_settings_update "$port"
+      ;;
+    2)
+      choose_profile 'Choose a Tunnel Profile' || return
+      proxycode_choose 'Health probe' 'Cloudflare' 'Mullvad' 'Custom HTTPS URL' || return 2
+      case $PROXYCODE_CHOICE in
+        1) probe=cloudflare; proxycode_prompt 'Expected country code, or blank for any' || return 2; expectation=$PROXYCODE_ANSWER ;;
+        2) probe=mullvad; proxycode_prompt 'Expected location, or blank for any' || return 2; expectation=$PROXYCODE_ANSWER ;;
+        3)
+          probe=custom
+          proxycode_prompt 'HTTPS probe URL' || return 2; url=$PROXYCODE_ANSWER
+          proxycode_prompt 'Expected HTTP status' 200 || return 2; status=$PROXYCODE_ANSWER
+          proxycode_prompt 'Required response text, or blank for any' || return 2; contains=$PROXYCODE_ANSWER
+          ;;
+      esac
+      proxycode_profile_settings_update "$PROXYCODE_SELECTED_PROFILE" "$probe" "$expectation" "$url" "$status" "$contains"
+      ;;
+  esac
+}
+
+interactive_management() {
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    proxycode_help >&2
+    return 2
+  fi
+  printf '\033[?25l'
+  trap 'printf "\033[?25h"' EXIT
+  proxycode_heading management
+  proxycode_with_lifecycle_lock proxycode_status_locked || true
+  printf '\n'
+  while :; do
+    proxycode_choose --filter 'Choose an action' \
+      'Import a Tunnel Profile' \
+      'Select the Default Profile' \
+      'Start a Profile' \
+      'Stop the Active Profile' \
+      'Switch Active Profile' \
+      'Remove a Profile' \
+      'Status and health check' \
+      'Settings' \
+      'Exit' || return 2
+    case $PROXYCODE_CHOICE in
+      1) interactive_import ;;
+      2) choose_profile 'Choose the Default Tunnel Profile' && proxycode_profile_default "$PROXYCODE_SELECTED_PROFILE" ;;
+      3) choose_profile 'Choose a Tunnel Profile to start' && proxycode_with_lifecycle_lock proxycode_start_locked "$PROXYCODE_SELECTED_PROFILE" ;;
+      4) proxycode_with_lifecycle_lock proxycode_stop_locked ;;
+      5) choose_profile 'Choose a Tunnel Profile to switch to' && proxycode_with_lifecycle_lock proxycode_switch_locked "$PROXYCODE_SELECTED_PROFILE" false ;;
+      6) choose_profile 'Choose a Tunnel Profile to remove' && proxycode_with_lifecycle_lock proxycode_profile_remove "$PROXYCODE_SELECTED_PROFILE" false ;;
+      7)
+        proxycode_choose 'Status or health check?' 'Show local status' 'Check the Active Tunnel Profile' 'Back' || return 2
+        [[ $PROXYCODE_CHOICE == 1 ]] && proxycode_with_lifecycle_lock proxycode_status_locked
+        [[ $PROXYCODE_CHOICE == 2 ]] && proxycode_with_lifecycle_lock proxycode_check_locked
+        ;;
+      8) interactive_settings ;;
+      9) printf '\033[?25h'; trap - EXIT; return 0 ;;
+    esac
+  done
+}
+
 selected_profile=
 if [[ ${1:-} == --profile ]]; then
   (($# >= 3)) || { printf 'Usage: proxycode --profile NAME COMMAND [ARG...]\n' >&2; exit 2; }
@@ -163,15 +253,11 @@ case ${1:-} in
     exit 2
     ;;
   '')
-    printf 'proxycode: interactive management is not available yet\n' >&2
-    printf 'Try: proxycode help\n' >&2
-    exit 2
+    interactive_management
     ;;
   *)
     [[ $1 != -* ]] || { printf "proxycode: unknown option '%s'\n" "$1" >&2; exit 2; }
     proxycode_with_lifecycle_lock proxycode_prepare_wrapped_command_locked "$selected_profile" || exit
-    exec {PROXYCODE_LOCK_FD}>&-
-    exec {PROXYCODE_LEGACY_LOCK_FD}>&-
     export HTTP_PROXY=$PROXYCODE_WRAPPED_PROXY http_proxy=$PROXYCODE_WRAPPED_PROXY
     export HTTPS_PROXY=$PROXYCODE_WRAPPED_PROXY https_proxy=$PROXYCODE_WRAPPED_PROXY
     export ALL_PROXY=$PROXYCODE_WRAPPED_PROXY all_proxy=$PROXYCODE_WRAPPED_PROXY

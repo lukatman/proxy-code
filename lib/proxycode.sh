@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 
 PROXYCODE_VERSION=1.0.0
+PROXYCODE_PURPLE=$'\033[38;2;167;139;250m'
+PROXYCODE_PURPLE_BG=$'\033[48;2;167;139;250m'
+PROXYCODE_INK=$'\033[38;2;9;9;11m'
+PROXYCODE_TITLE_WEIGHT=$'\033[1m'
+PROXYCODE_CYAN=$'\033[38;2;103;232;249m'
+PROXYCODE_GREEN=$'\033[38;2;134;239;172m'
+PROXYCODE_MUTED=$'\033[38;2;113;113;122m'
+PROXYCODE_RESET=$'\033[0m'
 
 proxycode_init_paths() {
   local home_root config_root data_root state_root runtime_root
@@ -77,6 +85,152 @@ EOF
 proxycode_error() {
   printf 'proxycode: %s\n' "$1" >&2
   return "${2:-1}"
+}
+
+proxycode_heading() {
+  printf '\n%s┌───%s%s%s%s ProxyCode %s  %s\n%s│%s\n' \
+    "$PROXYCODE_MUTED" "$PROXYCODE_RESET" "$PROXYCODE_PURPLE_BG" "$PROXYCODE_INK" \
+    "$PROXYCODE_TITLE_WEIGHT" "$PROXYCODE_RESET" "$1" "$PROXYCODE_MUTED" "$PROXYCODE_RESET"
+}
+
+proxycode_menu_clear() {
+  printf '\033[%dA\r\033[J' "$1"
+}
+
+proxycode_trail() {
+  printf '%s◇%s %s\n%s│%s  %s%s%s\n%s│%s\n' \
+    "$PROXYCODE_GREEN" "$PROXYCODE_RESET" "$1" \
+    "$PROXYCODE_MUTED" "$PROXYCODE_RESET" "$PROXYCODE_GREEN" "$2" "$PROXYCODE_RESET" \
+    "$PROXYCODE_MUTED" "$PROXYCODE_RESET"
+}
+
+proxycode_choose() {
+  local filter=false prompt key rest number option indent='' selected=0 query='' rendered_lines=0 visible_count choice
+  local -a options visible_indexes
+  if [[ $1 == --filter ]]; then
+    filter=true
+    shift
+  fi
+  prompt=$1
+  shift
+  options=("$@")
+  while :; do
+    ((rendered_lines == 0)) || proxycode_menu_clear "$rendered_lines"
+    visible_indexes=()
+    for number in "${!options[@]}"; do
+      [[ -z $query || ${options[number],,} == *"${query,,}"* ]] && visible_indexes+=("$number")
+    done
+    visible_count=${#visible_indexes[@]}
+    ((selected < visible_count)) || selected=0
+    if $filter; then
+      indent='  '
+      printf '%s◆%s %s\n  %s>%s ' "$PROXYCODE_CYAN" "$PROXYCODE_RESET" "$prompt" "$PROXYCODE_PURPLE" "$PROXYCODE_RESET"
+      if [[ -n $query ]]; then
+        printf '%s%s█%s\n' "$query" "$PROXYCODE_CYAN" "$PROXYCODE_RESET"
+      else
+        printf '%s\033[7mt%s%sype to filter%s\n' "$PROXYCODE_CYAN" "$PROXYCODE_RESET" "$PROXYCODE_MUTED" "$PROXYCODE_RESET"
+      fi
+      printf '\n'
+      rendered_lines=3
+    else
+      printf '%s?%s %s\n' "$PROXYCODE_CYAN" "$PROXYCODE_RESET" "$prompt"
+      rendered_lines=1
+    fi
+    if ((visible_count == 0)); then
+      printf '  %sNo matches%s\n' "$PROXYCODE_CYAN" "$PROXYCODE_RESET"
+      rendered_lines=$((rendered_lines + 1))
+    fi
+    for ((number = 0; number < visible_count; number++)); do
+      choice=${visible_indexes[number]}
+      option=${options[choice]}
+      if ((number == selected)); then
+        printf '%s%s❯ %s%s\n' "$PROXYCODE_PURPLE" "$indent" "$option" "$PROXYCODE_RESET"
+      else
+        printf '%s  %s\n' "$indent" "$option"
+      fi
+      rendered_lines=$((rendered_lines + 1))
+    done
+    printf '\n%s  ↑↓ move, enter confirm%s\n' "$PROXYCODE_MUTED" "$PROXYCODE_RESET"
+    rendered_lines=$((rendered_lines + 2))
+    IFS= read -rsN1 key || return 1
+    case $key in
+      $'\n'|$'\r')
+        ((visible_count)) || continue
+        choice=${visible_indexes[selected]}
+        PROXYCODE_CHOICE=$((choice + 1))
+        proxycode_menu_clear "$rendered_lines"
+        proxycode_trail "$prompt" "${options[choice]}"
+        return
+        ;;
+      $'\033')
+        if ! IFS= read -rsN1 -t 0.2 rest; then
+          selected=0
+          query=
+          continue
+        fi
+        if [[ $rest == '[' ]] && IFS= read -rsN1 -t 0.2 rest; then
+          case $rest in
+            A) ((visible_count)) && selected=$(((selected + visible_count - 1) % visible_count)) ;;
+            B) ((visible_count)) && selected=$(((selected + 1) % visible_count)) ;;
+          esac
+        else
+          selected=0
+          query=
+          $filter && [[ $rest =~ ^[[:print:]]$ ]] && query=$rest
+        fi
+        ;;
+      $'\177'|$'\b')
+        if $filter; then query=${query%?}; selected=0; fi
+        ;;
+      *) $filter && [[ $key =~ ^[[:print:]]$ ]] && query+=$key && selected=0 ;;
+    esac
+  done
+}
+
+proxycode_prompt() {
+  local prompt=$1 default=${2:-} placeholder=${3:-${2:-}} answer='' key rest rendered=false
+  while :; do
+    $rendered && proxycode_menu_clear 2
+    printf '%s?%s %s\n%s│%s  ' "$PROXYCODE_CYAN" "$PROXYCODE_RESET" "$prompt" "$PROXYCODE_MUTED" "$PROXYCODE_RESET"
+    if [[ -n $answer ]]; then
+      printf '%s%s█%s' "$answer" "$PROXYCODE_CYAN" "$PROXYCODE_RESET"
+    elif [[ -n $placeholder ]]; then
+      printf '%s\033[7m%s%s%s%s%s' "$PROXYCODE_CYAN" "${placeholder:0:1}" "$PROXYCODE_RESET" \
+        "$PROXYCODE_MUTED" "${placeholder:1}" "$PROXYCODE_RESET"
+    else
+      printf '%s█%s' "$PROXYCODE_CYAN" "$PROXYCODE_RESET"
+    fi
+    printf '\n'
+    rendered=true
+    IFS= read -rsN1 key || return 1
+    case $key in
+      $'\n'|$'\r')
+        PROXYCODE_ANSWER=${answer:-$default}
+        proxycode_menu_clear 2
+        proxycode_trail "$prompt" "$PROXYCODE_ANSWER"
+        return
+        ;;
+      $'\033')
+        if ! IFS= read -rsN1 -t 0.2 rest; then
+          answer=
+        elif [[ $rest == '[' ]]; then
+          IFS= read -rsN1 -t 0.2 rest || answer=
+        else
+          answer=
+          [[ $rest =~ ^[[:print:]]$ ]] && answer=$rest
+        fi
+        ;;
+      $'\177'|$'\b') answer=${answer%?} ;;
+      *) [[ $key =~ ^[[:print:]]$ ]] && answer+=$key ;;
+    esac
+  done
+}
+
+proxycode_suggest_profile_name() {
+  local suggestion=${1##*/}
+  suggestion=${suggestion%.conf}
+  suggestion=$(printf '%s' "$suggestion" | sed -E 's/[^A-Za-z0-9._-]+/-/g; s/^[^A-Za-z0-9]+//; s/[^A-Za-z0-9]+$//')
+  proxycode_validate_profile_name "$suggestion" && printf '%s' "$suggestion" || printf profile
 }
 
 proxycode_write_private() {
@@ -402,26 +556,32 @@ proxycode_prepare_lifecycle() {
 }
 
 proxycode_with_lifecycle_lock() {
-  local operation=$1
+  local operation=$1 status=1
   shift
+  unset PROXYCODE_LOCK_FD PROXYCODE_LEGACY_LOCK_FD
   proxycode_init_paths || return
   mkdir -p "${PROXYCODE_RUNTIME_DIR%/*}" || return 1
   exec {PROXYCODE_LOCK_FD}<"${PROXYCODE_RUNTIME_DIR%/*}" || return 1
-  flock -x "$PROXYCODE_LOCK_FD" || return 1
-  [[ -x $PROXYCODE_BIN_DIR/proxycode && -r $PROXYCODE_DATA_DIR/lib/proxycode.sh && -r $PROXYCODE_STATE_DIR/install ]] || {
+  if ! flock -x "$PROXYCODE_LOCK_FD"; then
+    status=1
+  elif [[ ! -x $PROXYCODE_BIN_DIR/proxycode || ! -r $PROXYCODE_DATA_DIR/lib/proxycode.sh || ! -r $PROXYCODE_STATE_DIR/install ]]; then
     proxycode_error 'Toolkit installation changed while waiting; rerun the installer'
-    return
-  }
-  mkdir -p "$PROXYCODE_RUNTIME_DIR" || return 1
-  exec {PROXYCODE_LEGACY_LOCK_FD}>"$PROXYCODE_RUNTIME_DIR/lifecycle.lock" || return 1
-  chmod 600 "$PROXYCODE_RUNTIME_DIR/lifecycle.lock" || return 1
-  flock -x "$PROXYCODE_LEGACY_LOCK_FD" || return 1
-  [[ -x $PROXYCODE_BIN_DIR/proxycode && -r $PROXYCODE_DATA_DIR/lib/proxycode.sh && -r $PROXYCODE_STATE_DIR/install ]] || {
+    status=$?
+  elif ! mkdir -p "$PROXYCODE_RUNTIME_DIR" ||
+    ! exec {PROXYCODE_LEGACY_LOCK_FD}>"$PROXYCODE_RUNTIME_DIR/lifecycle.lock" ||
+    ! chmod 600 "$PROXYCODE_RUNTIME_DIR/lifecycle.lock" ||
+    ! flock -x "$PROXYCODE_LEGACY_LOCK_FD"; then
+    status=1
+  elif [[ ! -x $PROXYCODE_BIN_DIR/proxycode || ! -r $PROXYCODE_DATA_DIR/lib/proxycode.sh || ! -r $PROXYCODE_STATE_DIR/install ]]; then
     proxycode_error 'Toolkit installation changed while waiting; rerun the installer'
-    return
-  }
-  proxycode_prepare_lifecycle || return
-  "$operation" "$@"
+    status=$?
+  elif proxycode_prepare_lifecycle; then
+    "$operation" "$@"
+    status=$?
+  fi
+  [[ -z ${PROXYCODE_LEGACY_LOCK_FD:-} ]] || exec {PROXYCODE_LEGACY_LOCK_FD}>&-
+  exec {PROXYCODE_LOCK_FD}>&-
+  return "$status"
 }
 
 proxycode_process_start_time() {
@@ -731,7 +891,7 @@ proxycode_switch_locked() {
   [[ -d $profile ]] || { proxycode_error "Tunnel Profile '$name' does not exist" 2; return; }
   proxycode_inspect_active || return
   if [[ $PROXYCODE_ACTIVE_STATUS == active && $PROXYCODE_ACTIVE_PROFILE != "$name" ]]; then
-    proxycode_confirm "$yes" "Switch from Tunnel Profile '$PROXYCODE_ACTIVE_PROFILE' to '$name'?" || return
+    proxycode_confirm "$yes" "Switch from Tunnel Profile '$PROXYCODE_ACTIVE_PROFILE' to '$name'? Existing Wrapped commands may lose connectivity." || return
     proxycode_stop_locked || return
   fi
   proxycode_start_locked "$name"
