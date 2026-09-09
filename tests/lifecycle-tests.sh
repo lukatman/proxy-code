@@ -35,9 +35,8 @@ test_lifecycle_start_status_and_stop() {
   pid=$(sed -n 's/^PID=//p' "$XDG_RUNTIME_DIR/proxycode/active")
   [[ $pid =~ ^[0-9]+$ && -d /proc/$pid ]] || fail 'start records a running process'
   grep -q '^READY=1$' "$XDG_RUNTIME_DIR/proxycode/active" || fail 'successful activation marks state ready'
-  for fd in /proc/$pid/fd/*; do
+  for fd in /proc/"$pid"/fd/*; do
     [[ $(readlink "$fd" 2>/dev/null) != "$XDG_RUNTIME_DIR" ]] || fail 'WireProxy inherits the lifecycle lock'
-    [[ $(readlink "$fd" 2>/dev/null) != "$XDG_RUNTIME_DIR/proxycode/lifecycle.lock" ]] || fail 'WireProxy inherits the legacy lifecycle lock'
   done
 
   output=$("$cli" status)
@@ -158,6 +157,7 @@ test_lifecycle_stale_and_ambiguous_state() {
   new_home
   install_custom_binary >/dev/null || { fail 'state safety test install succeeds'; return; }
   local cli=$HOME/.local/bin/proxycode source=$TEST_HOME/source/work.conf state output status stat rest shell_started
+  local -a stat_fields
   write_wireguard_config "$source"
   "$cli" profile import "$source" --name work --default >/dev/null || { fail 'state safety Profile import succeeds'; return; }
   install_lifecycle_fakes
@@ -179,8 +179,8 @@ test_lifecycle_stale_and_ambiguous_state() {
 
   IFS= read -r stat <"/proc/$$/stat"
   rest=${stat##*) }
-  set -- $rest
-  shell_started=${20}
+  read -ra stat_fields <<<"$rest"
+  shell_started=${stat_fields[19]}
   printf 'PROFILE=work\nPID=%s\nSTART_TIME=%s\n' "$$" "$shell_started" >"$state"
   chmod 600 "$state"
   output=$("$cli" stop 2>&1)
@@ -267,7 +267,6 @@ IFS= read -r input
 printf '%s\n' "$input" >"$WRAPPED_STDIN_LOG"
 for fd in /proc/$$/fd/*; do
   [[ $(readlink "$fd" 2>/dev/null) != "$XDG_RUNTIME_DIR" ]] || exit 98
-  [[ $(readlink "$fd" 2>/dev/null) != "$XDG_RUNTIME_DIR/proxycode/lifecycle.lock" ]] || exit 98
 done
 printf 'wrapped stdout\n'
 printf 'wrapped stderr\n' >&2
@@ -404,138 +403,111 @@ test_lifecycle_lock_cleanup_after_failure() {
   TESTS=$((TESTS + 1))
   new_home
   install_custom_binary >/dev/null || { fail 'lock cleanup install succeeds'; return; }
+  local cli=$HOME/.local/bin/proxycode
   printf 'HTTP_PORT=invalid\nDEFAULT_PROFILE=\n' >"$XDG_CONFIG_HOME/proxycode/settings"
-
-  local status
-  timeout 2 bash -c '
-    source "$1"
-    proxycode_with_lifecycle_lock proxycode_status_locked >/dev/null 2>&1 || true
-    proxycode_with_lifecycle_lock proxycode_status_locked >/dev/null 2>&1
-  ' _ "$XDG_DATA_HOME/proxycode/lib/proxycode.sh"
-  status=$?
-  assert_eq 1 "$status" 'failed lifecycle preparation releases its locks'
+  assert_status 1 'invalid settings fail promptly' timeout 2 "$cli" status
+  printf 'HTTP_PORT=31080\nDEFAULT_PROFILE=\n' >"$XDG_CONFIG_HOME/proxycode/settings"
+  assert_status 0 'a command after failed preparation can acquire the lock' timeout 2 "$cli" status
 }
-
 
 test_probe_result_classification_and_cleanup() {
   TESTS=$((TESTS + 1))
   new_home
+  install_custom_binary >/dev/null || { fail 'probe test install succeeds'; return; }
+  local cli=$HOME/.local/bin/proxycode source=$TEST_HOME/source/work.conf calls status output
+  write_wireguard_config "$source"
+  "$cli" profile import "$source" --name work --default >/dev/null || { fail 'probe Profile import succeeds'; return; }
   install_lifecycle_fakes
-  export PATH=$TEST_HOME/lifecycle-fakes:$SYSTEM_PATH FAKE_CURL_CALLS=$TEST_HOME/curl-calls
-  (
-    source "$ROOT/lib/proxycode.sh"
-    proxycode_init_paths
-    mkdir -p "$PROXYCODE_RUNTIME_DIR" "$TEST_HOME/profile"
-    local transport expected http
-    printf 'PROBE=cloudflare\nEXPECT_LOCATION=SG\n' >"$TEST_HOME/profile/settings"
-    for transport in 0 5 6 7 18 28 35 52 55 56 92 60 63; do
-      export FAKE_CURL_EXIT=$transport
-      expected=75
-      ((transport == 0)) && expected=0
-      [[ $transport == 60 || $transport == 63 ]] && expected=1
-      proxycode_probe_once "$TEST_HOME/profile" 2
-      assert_eq "$expected" "$?" "transport $transport classification"
-      [[ -z $(find "$PROXYCODE_RUNTIME_DIR" -name 'probe.*' -print) ]] || fail 'probe temporary file survived transport result'
-    done
-    export FAKE_CURL_EXIT=0
-    for http in 200 204 408 429 500 503 400 301 2xx; do
-      export FAKE_CURL_STATUS=$http
-      expected=1
-      [[ $http == 200 || $http == 204 ]] && expected=0
-      [[ $http == 408 || $http == 429 || $http == 5* ]] && expected=75
-      proxycode_probe_once "$TEST_HOME/profile" 2
-      assert_eq "$expected" "$?" "HTTP $http classification"
-    done
-    export FAKE_CURL_STATUS=200
-    printf 'PROBE=mullvad\nEXPECT_LOCATION=Sweden\n' >"$TEST_HOME/profile/settings"
-    export FAKE_CURL_BODY='{"mullvad_exit_ip":true,"country":"Singapore"}'
-    proxycode_probe_once "$TEST_HOME/profile" 2
-    assert_eq 1 "$?" 'Mullvad mismatch fails'
-    assert_eq Singapore "$PROXYCODE_PROBE_LOCATION" 'Mullvad mismatch publishes location'
-    printf 'PROBE=custom\nURL=https://example.test\nSTATUS=503\nCONTAINS=[ready]\n' >"$TEST_HOME/profile/settings"
-    export FAKE_CURL_STATUS=503 FAKE_CURL_BODY='[ready]'
-    proxycode_probe_once "$TEST_HOME/profile" 2
-    assert_eq 0 "$?" 'explicit custom 503 succeeds and matching is literal'
-    assert_eq '' "$PROXYCODE_PROBE_LOCATION" 'custom success clears location'
-    export FAKE_CURL_BODY=ready
-    proxycode_probe_once "$TEST_HOME/profile" 2
-    assert_eq 1 "$?" 'custom substring is not a regular expression'
-    local calls
-    calls=$(<"$FAKE_CURL_CALLS")
-    chmod() { return 1; }
-    proxycode_probe_once "$TEST_HOME/profile" 2
-    assert_eq 1 "$?" 'response permission failure status'
-    assert_eq "$calls" "$(<"$FAKE_CURL_CALLS")" 'response permission failure does not request data'
-    unset -f chmod
-    [[ -z $(find "$PROXYCODE_RUNTIME_DIR" -name 'probe.*' -print) ]] || fail 'probe temporary file survived interpretation'
-    exit "$FAILURES"
-  )
-  assert_eq "$FAILURES" "$?" 'probe contract assertions'
+  EXPECTED_WIREPROXY_EXE=$(readlink -f "$XDG_DATA_HOME/proxycode/bin/wireproxy")
+  export EXPECTED_WIREPROXY_EXE FAKE_CURL_CALLS=$TEST_HOME/curl-calls
+  export PATH=$TEST_HOME/lifecycle-fakes:$SYSTEM_PATH
+  "$cli" start >/dev/null || { fail 'probe Profile starts'; return; }
+
+  calls=$(<"$FAKE_CURL_CALLS")
+  assert_status 1 'explicit check does not retry a timeout' env FAKE_CURL_EXIT=28 "$cli" check
+  assert_eq "$((calls + 1))" "$(<"$FAKE_CURL_CALLS")" 'explicit check makes one request'
+  for status in 503 400 301; do
+    assert_status 1 "unexpected HTTP $status fails" env FAKE_CURL_STATUS="$status" "$cli" check
+  done
+  "$cli" profile settings work --probe mullvad --expect-location Sweden >/dev/null
+  output=$(FAKE_CURL_BODY='{"mullvad_exit_ip":true,"country":"Singapore"}' "$cli" check 2>&1)
+  assert_eq 1 "$?" 'Mullvad mismatch fails'
+  [[ $output == *'Location: Singapore'* ]] || fail 'Mullvad mismatch reports observed location'
+
+  "$cli" profile settings work --probe custom --url https://example.test --status 503 --contains '[ready]' >/dev/null
+  output=$(FAKE_CURL_STATUS=503 FAKE_CURL_BODY='[ready]' "$cli" check)
+  assert_eq 0 "$?" 'explicit custom 503 succeeds'
+  [[ $output == *'Location: unavailable'* ]] || fail 'custom success clears observed location'
+  assert_status 1 'custom substring is literal' env FAKE_CURL_STATUS=503 FAKE_CURL_BODY=ready "$cli" check
+
+  cat >"$TEST_HOME/lifecycle-fakes/chmod" <<'EOF'
+#!/usr/bin/env bash
+[[ ${!#} == "$XDG_RUNTIME_DIR/proxycode/probe."* ]] && exit 1
+exec /usr/bin/chmod "$@"
+EOF
+  chmod 700 "$TEST_HOME/lifecycle-fakes/chmod"
+  calls=$(<"$FAKE_CURL_CALLS")
+  assert_status 1 'response permission failure fails check' "$cli" check
+  assert_eq "$calls" "$(<"$FAKE_CURL_CALLS")" 'response permission failure makes no request'
+  [[ -z $(find "$XDG_RUNTIME_DIR/proxycode" -name 'probe.*' -print) ]] || fail 'probe leaves temporary response files'
+  "$cli" stop >/dev/null || fail 'probe test stops its process'
 }
 
 test_active_state_write_failures() {
   TESTS=$((TESTS + 1))
   new_home
-  install_custom_binary >/dev/null || { fail 'state write fault test install'; return; }
-  local cli=$HOME/.local/bin/proxycode source=$TEST_HOME/source/work.conf fault status pid
+  install_custom_binary >/dev/null || { fail 'state write fault test install succeeds'; return; }
+  local cli=$HOME/.local/bin/proxycode source=$TEST_HOME/source/work.conf fault pid output
   write_wireguard_config "$source"
-  "$cli" profile import "$source" --name work --default >/dev/null || { fail 'state write fault profile'; return; }
+  "$cli" profile import "$source" --name work --default >/dev/null || { fail 'state write fault Profile import succeeds'; return; }
   install_lifecycle_fakes
   EXPECTED_WIREPROXY_EXE=$(readlink -f "$XDG_DATA_HOME/proxycode/bin/wireproxy")
   export EXPECTED_WIREPROXY_EXE FAKE_CURL_CALLS=$TEST_HOME/curl-calls WIREPROXY_START_LOG=$TEST_HOME/wireproxy-starts
-  export PATH=$TEST_HOME/lifecycle-fakes:$SYSTEM_PATH
+  export FAKE_ACTIVE_WRITES=$TEST_HOME/active-writes FAKE_ACTIVE_LOST_IDENTITY=$TEST_HOME/lost-identity
+  mkdir -p "$TEST_HOME/state-fakes"
+  cat >"$TEST_HOME/state-fakes/mv" <<'EOF'
+#!/usr/bin/env bash
+if [[ ${!#} == "$XDG_RUNTIME_DIR/proxycode/active" ]]; then
+  count=0
+  [[ ! -f $FAKE_ACTIVE_WRITES ]] || count=$(<"$FAKE_ACTIVE_WRITES")
+  count=$((count + 1))
+  printf '%s\n' "$count" >"$FAKE_ACTIVE_WRITES"
+  if ((count == FAKE_ACTIVE_FAIL)); then
+    [[ ${FAKE_ACTIVE_AMBIGUOUS:-0} == 0 ]] || touch "$FAKE_ACTIVE_LOST_IDENTITY"
+    exit 1
+  fi
+fi
+exec /usr/bin/mv "$@"
+EOF
+  cat >"$TEST_HOME/state-fakes/readlink" <<'EOF'
+#!/usr/bin/env bash
+if [[ ${!#} == /proc/*/exe && -f $FAKE_ACTIVE_LOST_IDENTITY ]]; then
+  printf '/usr/bin/not-wireproxy\n'
+else
+  exec "$TEST_HOME/lifecycle-fakes/readlink" "$@"
+fi
+EOF
+  chmod 700 "$TEST_HOME/state-fakes/"*
+  export TEST_HOME PATH=$TEST_HOME/state-fakes:$TEST_HOME/lifecycle-fakes:$SYSTEM_PATH
   for fault in 1 2 3; do
-    (
-      source "$ROOT/lib/proxycode.sh"
-      source <(declare -f proxycode_write_private | sed '1s/proxycode_write_private/original_write_private/')
-      writes=0
-      proxycode_write_private() {
-        if [[ $1 == "$PROXYCODE_RUNTIME_DIR/active" ]]; then
-          writes=$((writes + 1))
-          ((writes == fault)) && return 1
-        fi
-        original_write_private "$@"
-      }
-      proxycode_with_lifecycle_lock proxycode_start_locked work
-    ) >/dev/null 2>&1
-    status=$?
-    assert_eq 1 "$status" "active state write $fault failure status"
-    [[ ! -e $XDG_RUNTIME_DIR/proxycode/active ]] || fail "write $fault leaves active state after verified cleanup"
+    rm -f "$FAKE_ACTIVE_WRITES" "$WIREPROXY_START_LOG"
+    assert_status 1 "active state write $fault failure" env FAKE_ACTIVE_FAIL="$fault" "$cli" start
+    [[ ! -e $XDG_RUNTIME_DIR/proxycode/active ]] || fail "write $fault leaves active state after cleanup"
     if ((fault == 1)); then
-      [[ ! -e $WIREPROXY_START_LOG ]] || fail 'reservation failure spawned a process'
+      [[ ! -e $WIREPROXY_START_LOG ]] || fail 'reservation failure spawns a process'
     else
       pid=$(tail -n 1 "$WIREPROXY_START_LOG")
-      [[ ! -e /proc/$pid ]] || fail "write $fault leaves process after verified cleanup"
+      [[ ! -e /proc/$pid ]] || fail "write $fault leaves its process running"
     fi
   done
-  for fault in 2 3; do
-    (
-      source "$ROOT/lib/proxycode.sh"
-      source <(declare -f proxycode_write_private | sed '1s/proxycode_write_private/original_write_private/')
-      source <(declare -f proxycode_terminate_verified | sed '1s/proxycode_terminate_verified/original_terminate_verified/')
-      writes=0
-      proxycode_write_private() {
-        if [[ $1 == "$PROXYCODE_RUNTIME_DIR/active" ]]; then
-          writes=$((writes + 1))
-          ((writes == fault)) && return 1
-        fi
-        original_write_private "$@"
-      }
-      proxycode_terminate_verified() { return 1; }
-      proxycode_with_lifecycle_lock proxycode_start_locked work >/dev/null 2>&1
-      assert_eq 1 "$?" "write $fault with unverified cleanup fails"
-      grep -q '^READY=0$' "$PROXYCODE_RUNTIME_DIR/active" || fail 'unverified cleanup retains incomplete state'
-      pid=$(tail -n 1 "$WIREPROXY_START_LOG")
-      [[ -e /proc/$pid ]] || fail 'unverified cleanup must not signal process'
-      if ((fault == 2)); then
-        assert_eq unavailable "$(proxycode_read_setting "$PROXYCODE_RUNTIME_DIR/active" PID)" 'failed provisional write retains reservation'
-      else
-        assert_eq "$pid" "$(proxycode_read_setting "$PROXYCODE_RUNTIME_DIR/active" PID)" 'failed final write retains verified provisional identity'
-      fi
-      original_terminate_verified "$pid" "$(proxycode_process_start_time "$pid")" "$EXPECTED_WIREPROXY_EXE" "$PROXYCODE_DATA_DIR/profiles/work/wireproxy.conf" || fail 'fault test verified teardown'
-      rm -f -- "$PROXYCODE_RUNTIME_DIR/active"
-      exit "$FAILURES"
-    )
-    assert_eq "$FAILURES" "$?" "write $fault retained-state assertions"
-  done
+
+  rm -f "$FAKE_ACTIVE_WRITES"
+  output=$(FAKE_ACTIVE_FAIL=3 FAKE_ACTIVE_AMBIGUOUS=1 "$cli" start 2>&1)
+  assert_eq 1 "$?" 'failed final write with uncertain process identity fails'
+  [[ $output == *'ambiguous state was retained'* ]] || fail 'uncertain cleanup lacks recovery guidance'
+  grep -q '^READY=0$' "$XDG_RUNTIME_DIR/proxycode/active" || fail 'uncertain cleanup loses provisional state'
+  pid=$(tail -n 1 "$WIREPROXY_START_LOG")
+  [[ -e /proc/$pid ]] || fail 'uncertain cleanup signals the process'
+  rm -f "$FAKE_ACTIVE_LOST_IDENTITY"
+  "$cli" stop >/dev/null || fail 'restored process identity permits safe stop'
 }

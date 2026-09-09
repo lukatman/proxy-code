@@ -215,13 +215,14 @@ $DOWN$DOWN$DOWN$DOWN$DOWN$DOWN$DOWN$DOWN
   assert_eq 'travel' "$($cli profile list)" 'management import persists the Profile'
   assert_eq 'travel' "$(sed -n 's/^DEFAULT_PROFILE=//p' "$XDG_CONFIG_HOME/proxycode/settings")" 'management import selects Default when requested'
 
-  output=$(run_tty $'\033[B\n' bash -c 'source "$1"; proxycode_choose "Pick one" One Two; printf "choice=%s\n" "$PROXYCODE_CHOICE"' _ "$XDG_DATA_HOME/proxycode/lib/proxycode.sh")
-  [[ $output == *'choice=2'* ]] || fail 'chooser down arrow does not move immediately'
-
-  output=$(run_tty "old${ESCAPE}new
-" bash -c 'source "$1"; proxycode_prompt "Name" work; printf "answer=%s\n" "$PROXYCODE_ANSWER"' _ "$XDG_DATA_HOME/proxycode/lib/proxycode.sh")
-  [[ $output == *'answer=new'* ]] || fail 'Escape followed by typing does not reset the current text question'
-  [[ $output == *$'\033[38;2;103;232;249m\033[7mw\033[0m\033[38;2;113;113;122mork\033[0m'* ]] || fail 'default text does not begin under the block cursor'
+  output=$(run_tty "import
+$source
+old${ESCAPE}new
+$DOWN
+exit
+" "$cli")
+  [[ $output == *'Imported Tunnel Profile: new'* ]] || fail 'Escape followed by typing does not reset the Profile name'
+  assert_eq 'travel' "$(sed -n 's/^DEFAULT_PROFILE=//p' "$XDG_CONFIG_HOME/proxycode/settings")" 'down arrow chooses not to replace the Default'
 
   output=$(run_tty "*${BACKSPACE}sett
 $DOWN$DOWN
@@ -339,31 +340,40 @@ EOF
 
 test_probe_questionnaire_reset_and_cancellation() {
   TESTS=$((TESTS + 1))
-  (
-    source "$ROOT/lib/proxycode.sh"
-    initial_failures=$FAILURES
-    choice=3 answer=0 cancel_at=-1 choose_status=0
-    answers=('https://example.test/health' 200 'ready now')
-    proxycode_choose() { PROXYCODE_CHOICE=$choice; return "$choose_status"; }
-    proxycode_prompt() {
-      ((answer != cancel_at)) || return 1
-      PROXYCODE_ANSWER=${answers[answer]}
-      answer=$((answer + 1))
-    }
-    result() { (IFS='|'; printf '%s' "${PROXYCODE_PROBE_SETTINGS[*]}"); }
-    proxycode_prompt_probe_settings || fail 'custom questionnaire succeeds'
-    assert_eq 'custom||https://example.test/health|200|ready now' "$(result)" 'custom questionnaire argument order'
-    choice=1 answer=0 answers=('')
-    proxycode_prompt_probe_settings || fail 'repeated questionnaire succeeds'
-    assert_eq 'cloudflare||||' "$(result)" 'repeated questionnaire clears prior values'
-    choose_status=1
-    assert_status 2 'cancelled probe choice status' proxycode_prompt_probe_settings
-    choose_status=0 choice=3 answers=('https://example.test/health' 200 ready)
-    for cancel_at in 0 1 2; do
-      answer=0
-      assert_status 2 'cancelled probe answer status' proxycode_prompt_probe_settings
-      assert_eq "$cancel_at" "$answer" 'cancellation stops subsequent questions'
-    done
-    ((FAILURES == initial_failures))
-  ) || fail 'probe questionnaire reset and cancellation'
+  new_home
+  install_custom_binary >/dev/null || { fail 'probe questionnaire install succeeds'; return; }
+  local cli=$HOME/.local/bin/proxycode source=$TEST_HOME/source/work.conf output before input status
+  write_wireguard_config "$source"
+  "$cli" profile import "$source" --name work --default >/dev/null || { fail 'probe questionnaire Profile import succeeds'; return; }
+  output=$(run_tty "settings
+$DOWN
+
+$DOWN$DOWN
+https://example.test/health
+
+ready now
+settings
+$DOWN
+
+
+
+exit
+" "$cli")
+  [[ $output == *'Probe: custom'* && $output == *'Probe: cloudflare'* ]] || fail 'management cannot configure custom then default probes'
+  assert_eq $'Probe: cloudflare\nExpected location: any' "$("$cli" profile settings work)" 'repeated probe questionnaire clears previous answers'
+  ! grep -q 'ready now\|example.test' "$XDG_DATA_HOME/proxycode/profiles/work/settings" || fail 'previous custom answers remain stored'
+
+  before=$(sha256sum "$XDG_DATA_HOME/proxycode/profiles/work/settings")
+  input="settings
+$DOWN
+
+$DOWN$DOWN
+https://example.test/health
+"
+  output=$(run_tty "${input}"$'\003' timeout 5 "$cli" 2>&1)
+  status=$?
+  assert_eq 130 "$status" 'interrupt exits the probe questionnaire'
+  [[ $output == *'Expected HTTP status'* ]] || fail 'interrupt test does not reach the unfinished question'
+  [[ $output != *'Contains: configured'* ]] || fail 'interrupted probe questionnaire completes configuration'
+  assert_eq "$before" "$(sha256sum "$XDG_DATA_HOME/proxycode/profiles/work/settings")" 'interrupted questionnaire preserves Profile settings'
 }

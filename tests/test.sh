@@ -11,13 +11,46 @@ DOWN=$'\033[B'
 ESCAPE=$'\033'
 BACKSPACE=$'\177'
 
+test_process_matches() {
+  local pid=$1 started=$2 script=$3 stat rest argument
+  local -a fields
+  [[ $pid =~ ^[0-9]+$ && -r /proc/$pid/stat ]] || return 1
+  IFS= read -r stat <"/proc/$pid/stat" || return 1
+  rest=${stat##*) }
+  read -ra fields <<<"$rest"
+  [[ ${fields[19]:-} == "$started" && ${fields[0]:-} != Z ]] || return 1
+  while IFS= read -r -d '' argument; do
+    [[ $argument == "$script" ]] && return 0
+  done <"/proc/$pid/cmdline"
+  return 1
+}
+
 cleanup_tests() {
-  local directory
+  local directory pid started script attempt
+  export PATH=$SYSTEM_PATH
   for directory in "${TEST_HOMES[@]}"; do
+    [[ $directory == /tmp/proxycode-tests.* && -d $directory && ! -L $directory ]] || continue
+    if [[ -f $directory/processes ]]; then
+      while IFS=$'\t' read -r pid started script; do
+        [[ $script == "$directory/"* ]] || continue
+        if test_process_matches "$pid" "$started" "$script"; then
+          kill -TERM "$pid" 2>/dev/null || true
+          for attempt in {1..20}; do
+            test_process_matches "$pid" "$started" "$script" || break
+            sleep 0.1
+          done
+          if test_process_matches "$pid" "$started" "$script"; then
+            kill -KILL "$pid" 2>/dev/null || true
+          fi
+        fi
+      done <"$directory/processes"
+    fi
     rm -rf -- "$directory"
   done
 }
 trap cleanup_tests EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
 
 fail() {
   printf 'not ok %d - %s\n' "$TESTS" "$1"
@@ -42,7 +75,8 @@ assert_status() {
 }
 
 new_home() {
-  TEST_HOME=$(mktemp -d)
+  TEST_HOME=$(mktemp -d /tmp/proxycode-tests.XXXXXX) || exit 1
+  [[ $TEST_HOME == /tmp/proxycode-tests.* && -d $TEST_HOME && ! -L $TEST_HOME && -O $TEST_HOME ]] || exit 1
   TEST_HOMES+=("$TEST_HOME")
   export PATH=$SYSTEM_PATH
   export HOME=$TEST_HOME/home
@@ -53,7 +87,8 @@ new_home() {
   unset EXPECTED_PROXY_URL EXPECTED_WIREPROXY_EXE FAKE_CURL_BODY FAKE_CURL_CALLS FAKE_CURL_DELAY
   unset FAKE_CURL_EXIT FAKE_CURL_FAIL_EXIT FAKE_CURL_FAILS FAKE_CURL_STATUS FAKE_READLINK_EXE
   unset WIREPROXY_CONFIGTEST_FAIL WIREPROXY_PROFILE_CONFIGTEST_FAIL WIREPROXY_START_LOG
-  mkdir -p "$HOME" "$XDG_RUNTIME_DIR"
+  mkdir -p "$HOME" "$XDG_RUNTIME_DIR" || exit 1
+  export TEST_PROCESS_LOG=$TEST_HOME/processes
 }
 
 installation_digest() {
@@ -83,6 +118,9 @@ case \${1:-} in
         exit
       fi
     done
+    IFS= read -r process_stat </proc/\$\$/stat
+    read -ra process_fields <<<"\${process_stat##*) }"
+    printf '%s\\t%s\\t%s\\n' "\$\$" "\${process_fields[19]}" "\$0" >>"\$TEST_PROCESS_LOG"
     [[ -n \${WIREPROXY_START_LOG:-} ]] && printf '%s\\n' "\$\$" >>"\$WIREPROXY_START_LOG"
     trap 'exit 0' TERM INT
     while :; do sleep 1; done
@@ -185,6 +223,27 @@ EOF
   chmod 700 "$TEST_HOME/lifecycle-fakes/"*
 }
 
+test_sandbox_cleanup() {
+  TESTS=$((TESTS + 1))
+  new_home
+  local directory=$TEST_HOME pid unrelated attempt
+  fake_wireproxy "$TEST_HOME/custom/wireproxy"
+  "$TEST_HOME/custom/wireproxy" --config "$TEST_HOME/fake.conf" >/dev/null 2>&1 & pid=$!
+  sleep 60 & unrelated=$!
+  for attempt in {1..20}; do
+    [[ -s $TEST_PROCESS_LOG ]] && break
+    sleep 0.05
+  done
+  [[ -s $TEST_PROCESS_LOG ]] || fail 'fake process registers for cleanup'
+  printf '%s\t%s\t%s\n' "$unrelated" "$(awk '{print $22}' "/proc/$unrelated/stat")" "$TEST_HOME/custom/wireproxy" >>"$TEST_PROCESS_LOG"
+  cleanup_tests
+  [[ ! -e $directory ]] || fail 'cleanup leaves its temporary tree'
+  [[ ! -e /proc/$pid ]] || fail 'cleanup leaves its fake WireProxy running'
+  kill -0 "$unrelated" 2>/dev/null || fail 'cleanup signals an unrelated process'
+  kill -TERM "$unrelated" 2>/dev/null || true
+  wait "$pid" "$unrelated" 2>/dev/null || true
+}
+
 source "$ROOT/tests/install-tests.sh"
 source "$ROOT/tests/profile-tests.sh"
 source "$ROOT/tests/lifecycle-tests.sh"
@@ -212,7 +271,6 @@ test_uninstall_preserves_and_purge_deletes
 test_maintenance_process_safety_and_binary_drift
 test_overlapping_roots_refuse_changes
 test_purge_serializes_queued_cli_without_recreating_data
-test_reinstall_waits_for_previous_version_lock
 test_symlinked_managed_source_is_rejected_and_preserved
 test_uninstall_preserves_profiles_nested_under_logs
 test_invalid_install_and_runtime_residue_cleanup
@@ -231,6 +289,8 @@ test_active_state_write_failures
 test_probe_questionnaire_reset_and_cancellation
 test_setup_staging_paths_and_rollback
 test_setup_staging_retains_lifecycle_lock
+
+test_sandbox_cleanup
 
 if ((FAILURES)); then
   printf '%d of %d tests failed\n' "$FAILURES" "$TESTS" >&2

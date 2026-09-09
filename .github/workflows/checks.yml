@@ -1,0 +1,28 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Check syntax and shell usage
+        run: |
+          for file in install.sh bin/proxycode lib/proxycode.sh tests/*.sh; do
+            bash -n "$file"
+          done
+          shellcheck -x -P SCRIPTDIR install.sh bin/proxycode lib/proxycode.sh tests/*.sh
+      - name: Run isolated behavior tests
+        run: bash tests/test.sh

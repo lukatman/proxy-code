@@ -10,6 +10,44 @@ fi
 # shellcheck source=../lib/proxycode.sh
 source "$library"
 
+proxycode_help() {
+  cat <<'EOF'
+Usage:
+  proxycode
+  proxycode [--profile NAME] COMMAND [ARG...]
+  proxycode help|version|status|check|start|stop|switch|profile|settings ...
+
+Commands:
+  help                       Show this help
+  version                    Show the installed version
+  status                     Show local Toolkit state
+  check                      Check the Active Tunnel Profile
+  start [NAME]               Start a Tunnel Profile
+  stop                       Stop the Active Tunnel Profile
+  switch NAME [--yes]        Switch the Active Tunnel Profile
+
+Tunnel Profiles:
+  profile list
+  profile show NAME
+  profile import FILE --name NAME [--default] [--replace] [--yes]
+  profile default NAME
+  profile remove NAME [--yes]
+  profile settings NAME [PROBE OPTIONS]
+
+Settings:
+  settings [--http-port PORT]
+  profile settings NAME --probe cloudflare [--expect-location CC]
+  profile settings NAME --probe mullvad [--expect-location NAME]
+  profile settings NAME --probe custom --url HTTPS_URL --status CODE [--contains TEXT]
+
+Without options, settings commands show their current values.
+Run proxycode without arguments in a terminal for the management menu.
+Wrapped commands use the Default Tunnel Profile unless --profile selects one.
+Only one Profile can be active; use switch to change it explicitly.
+Reinstall or update by rerunning a fixed-version installer after proxycode stop.
+EOF
+}
+
 choose_profile() {
   local prompt=$1
   local -a profiles
@@ -98,7 +136,7 @@ if [[ ${1:-} == --profile ]]; then
   shift 2
 fi
 case ${1:-} in
-  help|--help|version|--version|status|check|start|stop|switch|profile|settings|upgrade)
+  help|--help|version|--version|status|check|start|stop|switch|profile|settings)
     [[ -z $selected_profile ]] || { printf 'proxycode: --profile is only valid with a Wrapped command\n' >&2; exit 2; }
     ;;
 esac
@@ -194,7 +232,7 @@ case ${1:-} in
           proxycode_profile_settings_show "$name"
           exit
         fi
-        probe= expectation= url= status= contains=
+        probe='' expectation='' url='' status='' contains=''
         while (($#)); do
           case $1 in
             --probe|--expect-location|--url|--status|--contains)
@@ -237,10 +275,6 @@ case ${1:-} in
       shift
     done
     proxycode_with_lifecycle_lock proxycode_settings_update "$http_port"
-    ;;
-  upgrade)
-    printf 'proxycode: upgrade is not available yet\n' >&2
-    exit 2
     ;;
   '')
     interactive_management

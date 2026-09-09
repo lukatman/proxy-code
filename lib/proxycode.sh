@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
-PROXYCODE_VERSION=1.0.0
+# Public values consumed by the installer and CLI.
+# shellcheck disable=SC2034
+PROXYCODE_VERSION=0.1.0
 PROXYCODE_PURPLE=$'\033[38;2;167;139;250m'
 PROXYCODE_PURPLE_BG=$'\033[48;2;167;139;250m'
 PROXYCODE_INK=$'\033[38;2;9;9;11m'
@@ -59,27 +61,6 @@ proxycode_xdg_path() {
   else
     printf '%s' "$2"
   fi
-}
-
-proxycode_help() {
-  cat <<'EOF'
-Usage:
-  proxycode
-  proxycode [--profile NAME] COMMAND [ARG...]
-  proxycode help|version|status|check|start|stop|switch|profile|settings|upgrade ...
-
-Commands:
-  help                       Show this help
-  version                    Show the installed version
-  status                     Show local Toolkit state
-  check                      Check the Active Tunnel Profile
-  start [NAME]               Start a Tunnel Profile
-  stop                       Stop the Active Tunnel Profile
-  switch NAME [--yes]        Switch the Active Tunnel Profile
-  profile ...                Manage Tunnel Profiles
-  settings ...               Manage listener settings
-  upgrade [--yes]            Upgrade the Toolkit
-EOF
 }
 
 proxycode_error() {
@@ -245,6 +226,7 @@ proxycode_prompt_probe_settings() {
       PROXYCODE_PROBE_SETTINGS[0]=custom
       proxycode_prompt 'HTTPS probe URL' || return 2; PROXYCODE_PROBE_SETTINGS[2]=$PROXYCODE_ANSWER
       proxycode_prompt 'Expected HTTP status' 200 || return 2; PROXYCODE_PROBE_SETTINGS[3]=$PROXYCODE_ANSWER
+      # shellcheck disable=SC2034 # Consumed by the installer and CLI.
       proxycode_prompt 'Required response text, or blank for any' || return 2; PROXYCODE_PROBE_SETTINGS[4]=$PROXYCODE_ANSWER
       ;;
   esac
@@ -409,8 +391,8 @@ EOF
 }
 
 proxycode_generate_password() {
-  local uuid password= count
-  for count in 1 2 3; do
+  local uuid password='' count
+  for ((count = 0; count < 3; count++)); do
     IFS= read -r uuid </proc/sys/kernel/random/uuid || return 1
     [[ $uuid =~ ^[0-9a-f-]{36}$ ]] || return 1
     password+=${uuid//-/}
@@ -517,6 +499,8 @@ proxycode_profile_import() {
     return
   fi
   if $existed; then
+    # Either a failed copy or chmod must discard the staged Profile.
+    # shellcheck disable=SC2015
     cp -- "$profile/proxy-credential" "$profile/settings" "$stage/" &&
       chmod 600 "$stage/proxy-credential" "$stage/settings" || { rm -rf -- "$stage"; return 1; }
   else
@@ -582,7 +566,7 @@ proxycode_prepare_lifecycle() {
 proxycode_with_lifecycle_lock() {
   local operation=$1 status=1
   shift
-  unset PROXYCODE_LOCK_FD PROXYCODE_LEGACY_LOCK_FD
+  unset PROXYCODE_LOCK_FD
   proxycode_init_paths || return
   mkdir -p "${PROXYCODE_RUNTIME_DIR%/*}" || return 1
   exec {PROXYCODE_LOCK_FD}<"${PROXYCODE_RUNTIME_DIR%/*}" || return 1
@@ -591,31 +575,23 @@ proxycode_with_lifecycle_lock() {
   elif [[ ! -x $PROXYCODE_BIN_DIR/proxycode || ! -r $PROXYCODE_DATA_DIR/lib/proxycode.sh || ! -r $PROXYCODE_STATE_DIR/install ]]; then
     proxycode_error 'Toolkit installation changed while waiting; rerun the installer'
     status=$?
-  elif ! mkdir -p "$PROXYCODE_RUNTIME_DIR" ||
-    ! exec {PROXYCODE_LEGACY_LOCK_FD}>"$PROXYCODE_RUNTIME_DIR/lifecycle.lock" ||
-    ! chmod 600 "$PROXYCODE_RUNTIME_DIR/lifecycle.lock" ||
-    ! flock -x "$PROXYCODE_LEGACY_LOCK_FD"; then
-    status=1
-  elif [[ ! -x $PROXYCODE_BIN_DIR/proxycode || ! -r $PROXYCODE_DATA_DIR/lib/proxycode.sh || ! -r $PROXYCODE_STATE_DIR/install ]]; then
-    proxycode_error 'Toolkit installation changed while waiting; rerun the installer'
-    status=$?
   elif proxycode_prepare_lifecycle; then
     "$operation" "$@"
     status=$?
   fi
-  [[ -z ${PROXYCODE_LEGACY_LOCK_FD:-} ]] || exec {PROXYCODE_LEGACY_LOCK_FD}>&-
   exec {PROXYCODE_LOCK_FD}>&-
   return "$status"
 }
 
 proxycode_process_start_time() {
   local stat rest
+  local -a fields
   [[ $1 =~ ^[0-9]+$ ]] || return 1
   IFS= read -r stat 2>/dev/null <"/proc/$1/stat" || return 1
   rest=${stat##*) }
-  set -- $rest
-  (($# >= 20)) || return 1
-  printf '%s' "${20}"
+  read -ra fields <<<"$rest"
+  ((${#fields[@]} >= 20)) || return 1
+  printf '%s' "${fields[19]}"
 }
 
 proxycode_process_state() {
@@ -623,8 +599,7 @@ proxycode_process_state() {
   [[ $1 =~ ^[0-9]+$ ]] || return 1
   IFS= read -r stat 2>/dev/null <"/proc/$1/stat" || return 1
   rest=${stat##*) }
-  set -- $rest
-  printf '%s' "$1"
+  printf '%s' "${rest%% *}"
 }
 
 proxycode_process_matches() {
@@ -651,7 +626,7 @@ proxycode_wait_for_process_match() {
 proxycode_inspect_active() {
   local state=$PROXYCODE_RUNTIME_DIR/active expected_executable expected_config observed_start ready
   PROXYCODE_ACTIVE_STATUS=stopped
-  PROXYCODE_ACTIVE_PROFILE= PROXYCODE_ACTIVE_PID= PROXYCODE_ACTIVE_STARTED=
+  PROXYCODE_ACTIVE_PROFILE='' PROXYCODE_ACTIVE_PID='' PROXYCODE_ACTIVE_STARTED=''
   [[ -e $state ]] || return 0
   [[ -f $state && -r $state ]] || { PROXYCODE_ACTIVE_STATUS=ambiguous; return 0; }
   expected_executable=$(readlink -f "$PROXYCODE_DATA_DIR/bin/wireproxy") || { PROXYCODE_ACTIVE_STATUS=ambiguous; return 0; }
@@ -670,7 +645,7 @@ proxycode_inspect_active() {
   }
   if [[ ! -e /proc/$PROXYCODE_ACTIVE_PID || $(proxycode_process_state "$PROXYCODE_ACTIVE_PID") == Z ]]; then
     rm -f -- "$state"
-    PROXYCODE_ACTIVE_PROFILE= PROXYCODE_ACTIVE_PID= PROXYCODE_ACTIVE_STARTED=
+    PROXYCODE_ACTIVE_PROFILE='' PROXYCODE_ACTIVE_PID='' PROXYCODE_ACTIVE_STARTED=''
     return 0
   fi
   if proxycode_process_matches "$PROXYCODE_ACTIVE_PID" "$PROXYCODE_ACTIVE_STARTED" "$expected_executable" "$expected_config"; then
@@ -685,7 +660,7 @@ proxycode_inspect_active() {
       return 0
     fi
     rm -f -- "$state"
-    PROXYCODE_ACTIVE_PROFILE= PROXYCODE_ACTIVE_PID= PROXYCODE_ACTIVE_STARTED=
+    PROXYCODE_ACTIVE_PROFILE='' PROXYCODE_ACTIVE_PID='' PROXYCODE_ACTIVE_STARTED=''
   fi
 }
 
@@ -736,7 +711,7 @@ proxycode_interpret_probe() {
 }
 
 proxycode_probe_once() {
-  local profile=$1 timeout_seconds=$2 probe expectation url expected_status contains= body http_status curl_status=0 status=1
+  local profile=$1 timeout_seconds=$2 probe expectation url expected_status contains='' body http_status curl_status=0 status=1
   probe=$(proxycode_read_setting "$profile/settings" PROBE)
   expectation=$(proxycode_read_setting "$profile/settings" EXPECT_LOCATION)
   case $probe in
@@ -778,7 +753,7 @@ proxycode_run_probe() {
     ((remaining > 0)) || return 1
     ((attempt < remaining)) || attempt=$remaining
     PROXYCODE_PROBE_LOCATION=
-    http_proxy=$proxy_url https_proxy=$proxy_url all_proxy=$proxy_url HTTP_PROXY=$proxy_url HTTPS_PROXY=$proxy_url ALL_PROXY=$proxy_url NO_PROXY= no_proxy= \
+    http_proxy=$proxy_url https_proxy=$proxy_url all_proxy=$proxy_url HTTP_PROXY=$proxy_url HTTPS_PROXY=$proxy_url ALL_PROXY=$proxy_url NO_PROXY='' no_proxy='' \
       proxycode_probe_once "$profile" "$attempt"
     status=$?
     ((status == 0)) && return 0
@@ -789,6 +764,7 @@ proxycode_run_probe() {
 }
 
 proxycode_port_in_use() {
+  # shellcheck disable=SC2016 # The child Bash expands its positional argument.
   timeout 1 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$1' _ "$1" 2>/dev/null
 }
 
@@ -836,7 +812,6 @@ proxycode_start_locked() {
   (
     cd "$profile" || exit
     exec {PROXYCODE_LOCK_FD}>&-
-    exec {PROXYCODE_LEGACY_LOCK_FD}>&-
     exec nohup "$executable" --config "$config"
   ) >>"$log" 2>&1 &
   pid=$!
@@ -899,6 +874,7 @@ proxycode_prepare_wrapped_command_locked() {
     proxycode_error "Tunnel Profile '$name' Proxy credential is invalid"
     return
   fi
+  # shellcheck disable=SC2034 # Consumed by the CLI before exec.
   PROXYCODE_WRAPPED_PROXY=http://$username:$password@127.0.0.1:$PROXYCODE_HTTP_PORT
 }
 
@@ -953,7 +929,7 @@ proxycode_stop_locked() {
 }
 
 proxycode_status_locked() {
-  local profile profiles= active=none
+  local profile profiles='' active=none
   proxycode_inspect_active || return
   proxycode_rotate_log "$PROXYCODE_ACTIVE_PROFILE" || return
   while IFS= read -r profile; do

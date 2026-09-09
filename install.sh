@@ -4,14 +4,14 @@ set -u
 set -o pipefail
 umask 077
 
-PROXYCODE_VERSION=1.0.0
+PROXYCODE_VERSION=0.1.0
 WIREPROXY_VERSION=1.1.3
 WIREPROXY_AMD64_SHA256=e88c1d090740373fc606c1bafd81d9a5eadc642cce5667616e20e9d7a444f51c
 WIREPROXY_ARM64_SHA256=370e00bd2167960d1ecd1c3c1439715bbaa94a0a110a2040468670c9af6021b6
 WIREPROXY_RELEASE=https://github.com/windtf/wireproxy/releases/download/v1.1.3
 PROXYCODE_BUNDLE_ROOT=proxycode-$PROXYCODE_VERSION
 PROXYCODE_BUNDLE=$PROXYCODE_BUNDLE_ROOT.tar.gz
-PROXYCODE_RELEASE=https://github.com/lukatman/proxy-code/releases/download/v$PROXYCODE_VERSION
+PROXYCODE_RELEASE=https://github.com/lukatman/proxycode/releases/download/v$PROXYCODE_VERSION
 original_arguments=("$@")
 
 die() {
@@ -177,13 +177,6 @@ acquire_lifecycle_lock() {
   mkdir -p "${PROXYCODE_RUNTIME_DIR%/*}" || die 'cannot create the lifecycle lock directory'
   exec {INSTALL_LOCK_FD}<"${PROXYCODE_RUNTIME_DIR%/*}" || die 'cannot open the lifecycle lock'
   flock -x "$INSTALL_LOCK_FD" || die 'cannot acquire the lifecycle lock'
-  if [[ -e $PROXYCODE_RUNTIME_DIR/lifecycle.lock || -e $PROXYCODE_BIN_DIR/proxycode || -e $PROXYCODE_DATA_DIR/lib/proxycode.sh ]]; then
-    mkdir -p "$PROXYCODE_RUNTIME_DIR" || die 'cannot create the lifecycle directory'
-    chmod 700 "$PROXYCODE_RUNTIME_DIR" || die 'cannot secure the lifecycle directory'
-    exec {INSTALL_LEGACY_LOCK_FD}>"$PROXYCODE_RUNTIME_DIR/lifecycle.lock" || die 'cannot open the legacy lifecycle lock'
-    chmod 600 "$PROXYCODE_RUNTIME_DIR/lifecycle.lock" || die 'cannot secure the legacy lifecycle lock'
-    flock -x "$INSTALL_LEGACY_LOCK_FD" || die 'cannot acquire the legacy lifecycle lock'
-  fi
 }
 
 if [[ $mode == uninstall || $mode == purge ]]; then
@@ -210,7 +203,7 @@ if [[ $mode == uninstall || $mode == purge ]]; then
   if [[ $mode == purge ]]; then
     rm -rf -- "$PROXYCODE_CONFIG_DIR" "$PROXYCODE_DATA_DIR" "$PROXYCODE_STATE_DIR" "$PROXYCODE_RUNTIME_DIR" || die 'could not purge Toolkit data'
   else
-    rm -rf -- "$PROXYCODE_DATA_DIR/bin" "$PROXYCODE_DATA_DIR/lib" "$PROXYCODE_DATA_DIR/licenses" "$PROXYCODE_STATE_DIR" "$PROXYCODE_RUNTIME_DIR" || die 'could not remove installed Toolkit files'
+    rm -rf -- "${PROXYCODE_DATA_DIR:?}/bin" "${PROXYCODE_DATA_DIR:?}/lib" "$PROXYCODE_DATA_DIR/licenses" "$PROXYCODE_STATE_DIR" "$PROXYCODE_RUNTIME_DIR" || die 'could not remove installed Toolkit files'
   fi
   if [[ $mode == purge ]]; then
     printf 'Purged the Toolkit.\n'
@@ -444,7 +437,7 @@ case $PROXYCODE_ACTIVE_STATUS in
 esac
 
 if $installation_present; then
-  current_toolkit_version= current_wireproxy_version= current_wireproxy_digest= current_wireproxy_source=
+  current_toolkit_version='' current_wireproxy_version='' current_wireproxy_digest='' current_wireproxy_source=''
   if [[ -r $PROXYCODE_STATE_DIR/install ]]; then
     current_toolkit_version=$(proxycode_read_setting "$PROXYCODE_STATE_DIR/install" PROXYCODE_VERSION)
     current_wireproxy_version=$(proxycode_read_setting "$PROXYCODE_STATE_DIR/install" WIREPROXY_VERSION)
@@ -542,7 +535,6 @@ if $interactive; then
       $'\n'|$'\r') printf '\033[?25h'; review_confirmed=true; break ;;
       r|R)
         printf '\033[?25h'
-        [[ -z ${INSTALL_LEGACY_LOCK_FD:-} ]] || exec {INSTALL_LEGACY_LOCK_FD}>&-
         exec {INSTALL_LOCK_FD}>&-
         cleanup
         exec bash "$script_path"
@@ -649,12 +641,13 @@ if [[ $mode == profile ]]; then
   $replacing_profile && printf 'Replaced Tunnel Profile: %s\n' "$name" || printf 'Imported Tunnel Profile: %s\n' "$name"
   $make_default && printf 'Default Tunnel Profile: %s\n' "$name"
 fi
+# Show a copyable command with variables for the user's shell to expand.
+# shellcheck disable=SC2016
 case :$PATH: in
   *:"$PROXYCODE_BIN_DIR":*) ;;
   *) printf 'Add proxycode to PATH: export PATH="$HOME/.local/bin:$PATH"\n' ;;
 esac
 if $start_after; then
-  [[ -z ${INSTALL_LEGACY_LOCK_FD:-} ]] || exec {INSTALL_LEGACY_LOCK_FD}>&-
   exec {INSTALL_LOCK_FD}>&-
   proxycode_with_lifecycle_lock proxycode_start_locked "$name" || exit
 elif [[ $mode == install-only ]] && { [[ ! -d $PROXYCODE_DATA_DIR/profiles ]] || ! compgen -G "$PROXYCODE_DATA_DIR/profiles/*" >/dev/null; }; then
