@@ -4,3 +4,14 @@ skills-lock.json
 wireproxy_guide.md
 wireproxy_reusability_guide.md
 codex-app-dispatcher
+
+# Private networking inputs and generated runtime files
+*.conf
+*.log
+*.log.old
+proxy-credential
+wireproxy
+*.tar.gz
+*.tar.xz
+/runtime/
+/profiles/

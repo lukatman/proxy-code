@@ -6,12 +6,16 @@ test_custom_install_and_cli() {
 
   local output
   output=$(install_custom_binary) || { fail 'custom install succeeds'; return; }
-  [[ $output == *'Installed proxycode 1.0.0.'* ]] || fail 'install reports Toolkit version'
+  [[ $output == *'Installed proxycode 0.1.0.'* ]] || fail 'install reports Toolkit version'
   [[ $output == *'custom WireProxy v1.1.3'* ]] || fail 'install identifies custom WireProxy'
 
   local cli=$HOME/.local/bin/proxycode
-  assert_eq 'proxycode 1.0.0' "$("$cli" version)" 'version output'
-  [[ $("$cli" help) == Usage:* ]] || fail 'help output starts with usage'
+  assert_eq 'proxycode 0.1.0' "$("$cli" version)" 'version output'
+  output=$("$cli" help)
+  [[ $output == Usage:* ]] || fail 'help output starts with usage'
+  [[ $output == *'proxycode [--profile NAME] COMMAND [ARG...]'* ]] || fail 'help documents explicit Profile wrapping'
+  [[ $output == *'profile settings NAME --probe custom --url HTTPS_URL --status CODE [--contains TEXT]'* ]] || fail 'help documents complete custom probe settings'
+  [[ $output != *upgrade* ]] || fail 'help advertises an unavailable upgrade command'
   assert_mode "$cli" 700
   assert_mode "$XDG_DATA_HOME/proxycode/bin/wireproxy" 700
   assert_mode "$XDG_DATA_HOME/proxycode/lib/proxycode.sh" 600
@@ -149,7 +153,7 @@ test_reinstall_preserves_user_data_and_refuses_active() {
   export FAKE_CURL_CALLS=$TEST_HOME/curl-calls WIREPROXY_START_LOG=$TEST_HOME/wireproxy-starts
   PATH=$TEST_HOME/lifecycle-fakes:$SYSTEM_PATH
   "$cli" start work >/dev/null || { fail 'reinstall Active Profile starts'; return; }
-  pid=$(sed -n 's/^PID=//p' "$XDG_RUNTIME_DIR/proxycode/active")
+  pid=$(sed -n 's/^PID=//p' "$XDG_STATE_HOME/proxycode/active")
   fake_wireproxy "$TEST_HOME/custom/new-wireproxy" 1.2.0
 
   before=$(installation_digest)
@@ -167,7 +171,7 @@ test_reinstall_preserves_user_data_and_refuses_active() {
   output=$(bash "$ROOT/install.sh" --install-only --wireproxy-bin "$TEST_HOME/custom/new-wireproxy") || { fail 'stopped reinstall succeeds'; return; }
   after=$(/usr/bin/sha256sum "$XDG_CONFIG_HOME/proxycode/settings" "$profile/"*)
   assert_eq "$before" "$after" 'reinstall changes settings, Profile, or Proxy credential'
-  assert_eq 'proxycode 1.0.0' "$("$cli" version)" 'reinstall refreshes the Toolkit command'
+  assert_eq 'proxycode 0.1.0' "$("$cli" version)" 'reinstall refreshes the Toolkit command'
   assert_eq 'wireproxy v1.2.0' "$("$XDG_DATA_HOME/proxycode/bin/wireproxy" --version)" 'reinstall refreshes managed WireProxy'
   [[ $output == *'Installed custom WireProxy v1.2.0.'* ]] || fail 'reinstall reports refreshed WireProxy'
 }
@@ -213,6 +217,8 @@ test_uninstall_preserves_and_purge_deletes() {
   new_home
   install_custom_binary >/dev/null || { fail 'removal baseline succeeds'; return; }
   local cli=$HOME/.local/bin/proxycode source=$TEST_HOME/source/work.conf profile password preserved output status pid
+  mkdir -p "$XDG_RUNTIME_DIR/proxycode"
+  printf 'unrelated runtime data\n' >"$XDG_RUNTIME_DIR/proxycode/keep"
   write_wireguard_config "$source"
   "$cli" profile import "$source" --name work --default >/dev/null || { fail 'removal work Profile import succeeds'; return; }
   "$cli" profile import "$source" --name travel >/dev/null || { fail 'removal travel Profile import succeeds'; return; }
@@ -227,9 +233,7 @@ test_uninstall_preserves_and_purge_deletes() {
   export FAKE_CURL_CALLS=$TEST_HOME/curl-calls WIREPROXY_START_LOG=$TEST_HOME/wireproxy-starts
   PATH=$TEST_HOME/lifecycle-fakes:$SYSTEM_PATH
   "$cli" start work >/dev/null || { fail 'uninstall Active Profile starts'; return; }
-  pid=$(sed -n 's/^PID=//p' "$XDG_RUNTIME_DIR/proxycode/active")
-  touch "$XDG_RUNTIME_DIR/proxycode/lifecycle.lock"
-  chmod 600 "$XDG_RUNTIME_DIR/proxycode/lifecycle.lock"
+  pid=$(sed -n 's/^PID=//p' "$XDG_STATE_HOME/proxycode/active")
   preserved=$(/usr/bin/sha256sum "$XDG_CONFIG_HOME/proxycode/settings" "$XDG_DATA_HOME/proxycode/profiles/"*/*)
 
   output=$(bash "$ROOT/install.sh" --uninstall 2>&1)
@@ -241,9 +245,10 @@ test_uninstall_preserves_and_purge_deletes() {
   output=$(bash "$ROOT/install.sh" --uninstall --yes) || { fail 'confirmed uninstall succeeds'; return; }
   [[ $output == *'Stopped Tunnel Profile: work'* && $output == *'preserved'* ]] || fail 'uninstall does not report verified stop and preservation'
   [[ ! -e /proc/$pid && ! -e $cli && ! -e $XDG_DATA_HOME/proxycode/bin && ! -e $XDG_DATA_HOME/proxycode/lib && ! -e $XDG_DATA_HOME/proxycode/licenses ]] || fail 'uninstall leaves managed executables or libraries'
-  [[ ! -e $XDG_STATE_HOME/proxycode && ! -e $XDG_RUNTIME_DIR/proxycode ]] || fail 'uninstall leaves logs, metadata, or runtime state'
+  [[ ! -e $XDG_STATE_HOME/proxycode ]] || fail 'uninstall leaves logs, metadata, or runtime state'
   assert_eq "$preserved" "$(/usr/bin/sha256sum "$XDG_CONFIG_HOME/proxycode/settings" "$XDG_DATA_HOME/proxycode/profiles/"*/*)" 'uninstall changes settings, Profiles, or Proxy credentials'
   [[ -f $source ]] || fail 'uninstall touches an original WireGuard source'
+  assert_eq 'unrelated runtime data' "$(cat "$XDG_RUNTIME_DIR/proxycode/keep")" 'uninstall changes unrelated runtime data'
 
   PATH=$SYSTEM_PATH
   bash "$ROOT/install.sh" --install-only --wireproxy-bin "$TEST_HOME/custom/wireproxy" >/dev/null || { fail 'reinstall after uninstall succeeds'; return; }
@@ -262,13 +267,12 @@ test_uninstall_preserves_and_purge_deletes() {
   export EXPECTED_WIREPROXY_EXE
   PATH=$TEST_HOME/lifecycle-fakes:$SYSTEM_PATH
   "$cli" start work >/dev/null || { fail 'purge Active Profile starts'; return; }
-  pid=$(sed -n 's/^PID=//p' "$XDG_RUNTIME_DIR/proxycode/active")
-  touch "$XDG_RUNTIME_DIR/proxycode/lifecycle.lock"
-  chmod 600 "$XDG_RUNTIME_DIR/proxycode/lifecycle.lock"
+  pid=$(sed -n 's/^PID=//p' "$XDG_STATE_HOME/proxycode/active")
   output=$(bash "$ROOT/install.sh" --purge --yes) || { fail 'confirmed purge succeeds'; return; }
   [[ $output == *'travel'* && $output == *'work'* && $output == *'Stopped Tunnel Profile: work'* ]] || fail 'purge does not report affected Profiles and verified stop'
-  [[ ! -e /proc/$pid && ! -e $cli && ! -e $XDG_CONFIG_HOME/proxycode && ! -e $XDG_DATA_HOME/proxycode && ! -e $XDG_STATE_HOME/proxycode && ! -e $XDG_RUNTIME_DIR/proxycode ]] || fail 'purge leaves Toolkit data or process behind'
+  [[ ! -e /proc/$pid && ! -e $cli && ! -e $XDG_CONFIG_HOME/proxycode && ! -e $XDG_DATA_HOME/proxycode && ! -e $XDG_STATE_HOME/proxycode ]] || fail 'purge leaves Toolkit data or process behind'
   [[ -f $source ]] || fail 'purge touches an original WireGuard source'
+  assert_eq 'unrelated runtime data' "$(cat "$XDG_RUNTIME_DIR/proxycode/keep")" 'purge changes unrelated runtime data'
 }
 
 test_maintenance_process_safety_and_binary_drift() {
@@ -278,9 +282,11 @@ test_maintenance_process_safety_and_binary_drift() {
   local cli=$HOME/.local/bin/proxycode source=$TEST_HOME/source/work.conf state stat rest shell_started before output status unrelated password pid
   write_wireguard_config "$source"
   "$cli" profile import "$source" --name work --default >/dev/null || { fail 'maintenance safety Profile import succeeds'; return; }
-  state=$XDG_RUNTIME_DIR/proxycode/active
+  state=$XDG_STATE_HOME/proxycode/active
   IFS= read -r stat <"/proc/$$/stat"
   rest=${stat##*) }
+  # /proc stat fields after the command name are whitespace-separated numbers.
+  # shellcheck disable=SC2086
   set -- $rest
   shell_started=${20}
   printf 'PROFILE=work\nPID=%s\nSTART_TIME=%s\nREADY=1\n' "$$" "$shell_started" >"$state"
@@ -325,7 +331,7 @@ test_maintenance_process_safety_and_binary_drift() {
 test_overlapping_roots_refuse_changes() {
   TESTS=$((TESTS + 1))
   new_home
-  export XDG_CONFIG_HOME=$TEST_HOME/shared XDG_DATA_HOME=$TEST_HOME/shared XDG_STATE_HOME=$TEST_HOME/shared XDG_RUNTIME_DIR=$TEST_HOME/shared
+  export XDG_CONFIG_HOME=$TEST_HOME/shared XDG_DATA_HOME=$TEST_HOME/shared XDG_STATE_HOME=$TEST_HOME/shared
   local profile=$TEST_HOME/shared/proxycode/profiles/work output status
   mkdir -p "$profile"
   printf 'preserve me\n' >"$profile/wireguard.conf"
@@ -354,7 +360,7 @@ exec /usr/bin/rm "$@"
 EOF
   chmod 700 "$TEST_HOME/blocking-path/rm"
   PATH=$TEST_HOME/blocking-path:$SYSTEM_PATH bash "$ROOT/install.sh" --purge --yes >"$TEST_HOME/purge.out" & purge_pid=$!
-  for attempt in {1..50}; do
+  for ((attempt = 0; attempt < 50; attempt++)); do
     [[ -e $BLOCK_ENTERED ]] && break
     sleep 0.05
   done
@@ -370,33 +376,7 @@ EOF
   fi
   output=$(<"$TEST_HOME/queued.out")
   [[ $output == *'installation changed while waiting'* ]] || fail 'queued CLI lacks maintenance-race guidance'
-  [[ ! -e $XDG_CONFIG_HOME/proxycode && ! -e $XDG_DATA_HOME/proxycode && ! -e $XDG_STATE_HOME/proxycode && ! -e $XDG_RUNTIME_DIR/proxycode ]] || fail 'queued CLI recreates Toolkit data during purge'
-}
-
-test_reinstall_waits_for_previous_version_lock() {
-  TESTS=$((TESTS + 1))
-  new_home
-  install_custom_binary >/dev/null || { fail 'cross-version lock baseline succeeds'; return; }
-  local legacy_lock=$XDG_RUNTIME_DIR/proxycode/lifecycle.lock holder installer attempt
-  mkdir -p "${legacy_lock%/*}"
-  (
-    exec 9>"$legacy_lock"
-    flock -x 9
-    touch "$TEST_HOME/legacy-entered"
-    until [[ -e $TEST_HOME/legacy-release ]]; do sleep 0.05; done
-  ) & holder=$!
-  for attempt in {1..50}; do
-    [[ -e $TEST_HOME/legacy-entered ]] && break
-    sleep 0.05
-  done
-  [[ -e $TEST_HOME/legacy-entered ]] || { kill -TERM "$holder" 2>/dev/null; fail 'previous-version lock holder did not start'; return; }
-
-  bash "$ROOT/install.sh" --install-only --wireproxy-bin "$TEST_HOME/custom/wireproxy" >/dev/null & installer=$!
-  sleep 0.1
-  kill -0 "$installer" 2>/dev/null || fail 'reinstall bypasses the previous-version lifecycle lock'
-  touch "$TEST_HOME/legacy-release"
-  wait "$holder"
-  wait "$installer" || fail 'reinstall after previous-version lock succeeds'
+  [[ ! -e $XDG_CONFIG_HOME/proxycode && ! -e $XDG_DATA_HOME/proxycode && ! -e $XDG_STATE_HOME/proxycode ]] || fail 'queued CLI recreates Toolkit data during purge'
 }
 
 test_symlinked_managed_source_is_rejected_and_preserved() {
@@ -444,13 +424,12 @@ test_invalid_install_and_runtime_residue_cleanup() {
   output=$(bash "$ROOT/install.sh" --install-only --wireproxy-bin "$invalid" 2>&1)
   status=$?
   assert_eq 1 "$status" 'invalid custom binary status'
-  [[ ! -e $HOME/.local/bin/proxycode && ! -e $XDG_CONFIG_HOME/proxycode && ! -e $XDG_DATA_HOME/proxycode && ! -e $XDG_STATE_HOME/proxycode && ! -e $XDG_RUNTIME_DIR/proxycode ]] || fail 'failed validation changes live Toolkit state'
+  [[ ! -e $HOME/.local/bin/proxycode && ! -e $XDG_CONFIG_HOME/proxycode && ! -e $XDG_DATA_HOME/proxycode && ! -e $XDG_STATE_HOME/proxycode ]] || fail 'failed validation changes live Toolkit state'
 
   install_custom_binary >/dev/null || { fail 'runtime residue baseline succeeds'; return; }
-  mkdir -p "$XDG_RUNTIME_DIR/proxycode"
-  printf 'interrupted probe\n' >"$XDG_RUNTIME_DIR/proxycode/probe.abandoned"
+  printf 'interrupted probe\n' >"$XDG_STATE_HOME/proxycode/probe.abandoned"
   bash "$ROOT/install.sh" --uninstall --yes >/dev/null || { fail 'runtime residue uninstall succeeds'; return; }
-  [[ ! -e $XDG_RUNTIME_DIR/proxycode ]] || fail 'uninstall reports success with runtime residue'
+  [[ ! -e $XDG_STATE_HOME/proxycode ]] || fail 'uninstall reports success with runtime residue'
 }
 
 test_unsupported_platform_changes_nothing() {
@@ -469,22 +448,21 @@ test_unsupported_platform_changes_nothing() {
 test_missing_dependencies_change_nothing() {
   TESTS=$((TESTS + 1))
   new_home
-  local original_path=$PATH output status
+  local output status
   mkdir -p "$TEST_HOME/empty-path"
-  PATH=$TEST_HOME/empty-path
-
-  output=$(/usr/bin/bash "$ROOT/install.sh" --install-only 2>&1)
+  output=$(PATH=$TEST_HOME/empty-path /usr/bin/bash "$ROOT/install.sh" --install-only 2>&1)
   status=$?
-  PATH=$original_path
   assert_eq 1 "$status" 'missing dependency status'
   [[ $output == *'missing required commands: curl flock tar sha256sum timeout mktemp readlink stat nohup awk grep sed'* ]] || fail 'all missing dependencies are reported together'
   [[ ! -e $XDG_DATA_HOME/proxycode ]] || fail 'missing dependencies write no Toolkit data'
 }
 
+# Keep actual pipes: bootstrap must work when Bash reads a pipe, not a source file.
+# shellcheck disable=SC2002
 test_piped_bootstrap() {
   TESTS=$((TESTS + 1))
   new_home
-  local release=$TEST_HOME/release/proxycode-1.0.0 bundle=$TEST_HOME/proxycode-1.0.0.tar.gz output status
+  local release=$TEST_HOME/release/proxycode-0.1.0 bundle=$TEST_HOME/proxycode-0.1.0.tar.gz output status
   mkdir -p "$release/bin" "$release/lib" "$TEST_HOME/bootstrap-fakes"
   cat >"$release/install.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -493,8 +471,8 @@ printf 'bundle installer ran\n'
 EOF
   printf '# bundled command\n' >"$release/bin/proxycode"
   printf '# bundled library\n' >"$release/lib/proxycode.sh"
-  tar -czf "$bundle" -C "$TEST_HOME/release" proxycode-1.0.0
-  (cd "$TEST_HOME" && sha256sum proxycode-1.0.0.tar.gz >proxycode-1.0.0.tar.gz.sha256)
+  tar -czf "$bundle" -C "$TEST_HOME/release" proxycode-0.1.0
+  (cd "$TEST_HOME" && sha256sum proxycode-0.1.0.tar.gz >proxycode-0.1.0.tar.gz.sha256)
   cat >"$TEST_HOME/bootstrap-fakes/curl" <<'EOF'
 #!/usr/bin/env bash
 for ((index = 1; index <= $#; index++)); do
@@ -512,10 +490,10 @@ EOF
   }
   [[ $output == *'bundle installer ran'* ]] || fail 'piped bootstrap does not run the verified bundle installer'
   assert_eq $'--install-only\n--wireproxy-bin\n'"$TEST_HOME/a binary" "$(<"$BOOTSTRAP_ARGS")" 'piped bootstrap preserves argv'
-  assert_eq $'https://github.com/lukatman/proxy-code/releases/download/v1.0.0/proxycode-1.0.0.tar.gz\nhttps://github.com/lukatman/proxy-code/releases/download/v1.0.0/proxycode-1.0.0.tar.gz.sha256' "$(<"$BOOTSTRAP_URLS")" 'piped bootstrap uses fixed release assets'
+  assert_eq $'https://github.com/lukatman/proxycode/releases/download/v0.1.0/proxycode-0.1.0.tar.gz\nhttps://github.com/lukatman/proxycode/releases/download/v0.1.0/proxycode-0.1.0.tar.gz.sha256' "$(<"$BOOTSTRAP_URLS")" 'piped bootstrap uses fixed release assets'
 
   rm -f "$BOOTSTRAP_URLS"
-  output=$(cat "$ROOT/install.sh" | PATH=$TEST_HOME/bootstrap-fakes:$SYSTEM_PATH bash -s 2>&1)
+  output=$(cat "$ROOT/install.sh" | PATH=$TEST_HOME/bootstrap-fakes:$SYSTEM_PATH setsid --wait bash -s 2>&1)
   status=$?
   assert_eq 2 "$status" 'non-terminal piped setup status'
   [[ $output == *'complete setup flags'* ]] || fail 'non-terminal piped setup lacks complete-flags guidance'
@@ -524,8 +502,8 @@ EOF
   cp "$ROOT/install.sh" "$release/install.sh"
   cp "$ROOT/bin/proxycode" "$release/bin/proxycode"
   cp "$ROOT/lib/proxycode.sh" "$release/lib/proxycode.sh"
-  tar -czf "$bundle" -C "$TEST_HOME/release" proxycode-1.0.0
-  (cd "$TEST_HOME" && sha256sum proxycode-1.0.0.tar.gz >proxycode-1.0.0.tar.gz.sha256)
+  tar -czf "$bundle" -C "$TEST_HOME/release" proxycode-0.1.0
+  (cd "$TEST_HOME" && sha256sum proxycode-0.1.0.tar.gz >proxycode-0.1.0.tar.gz.sha256)
   fake_wireproxy "$TEST_HOME/custom/wireproxy"
   output=$(run_tty "$DOWN
 $DOWN
@@ -536,4 +514,3 @@ $TEST_HOME/custom/wireproxy
   }
   [[ $output == *' ProxyCode '*setup* && $output == *'Installed custom WireProxy v1.1.3.'* ]] || fail 'piped installer does not prompt on the terminal'
 }
-
