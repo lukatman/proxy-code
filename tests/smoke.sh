@@ -78,7 +78,12 @@ step 'start and initial HTTPS check' "$cli" start
 pid=$("$cli" status | sed -n 's/^Process: running (PID \([0-9]*\))$/\1/p')
 [[ $pid =~ ^[0-9]+$ && $(readlink "/proc/$pid/exe") == "$XDG_DATA_HOME/proxycode/bin/wireproxy" ]]
 port_is_listening
-step 'explicit health check' "$cli" check
+rm -rf -- "${XDG_RUNTIME_DIR:?}"
+export XDG_RUNTIME_DIR=$sandbox/next-runtime
+mkdir -p "$XDG_RUNTIME_DIR/proxycode"
+printf 'unrelated runtime data\n' >"$XDG_RUNTIME_DIR/proxycode/keep"
+[[ $("$cli" status) == *"Process: running (PID $pid)"* ]]
+step 'health check after runtime directory replacement' "$cli" check
 unauthenticated_status=$(curl --disable --silent --noproxy '' --proxy "http://127.0.0.1:$port" --max-time 10 \
   --output /dev/null --write-out '%{http_connect}' https://cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
 [[ $unauthenticated_status == 407 ]]
@@ -89,7 +94,7 @@ step 'wrapped authenticated HTTPS request' "$cli" bash -c '
   curl --disable --silent --show-error --fail --max-time 30 https://cloudflare.com/cdn-cgi/trace -o /dev/null
 '
 step 'stop' "$cli" stop
-[[ ! -e $XDG_RUNTIME_DIR/proxycode/active ]]
+[[ ! -e $XDG_STATE_HOME/proxycode/active ]]
 [[ $("$cli" status) == *'Process: stopped'* ]]
 [[ $(readlink "/proc/$pid/exe" 2>/dev/null || true) != "$XDG_DATA_HOME/proxycode/bin/wireproxy" ]]
 if port_is_listening; then exit 1; fi
@@ -98,12 +103,14 @@ step 'reinstall' bash "$installer" --install-only
 [[ $(profile_digest) == "$before" ]]
 step 'uninstall' bash "$installer" --uninstall --yes
 [[ ! -e $cli && $(profile_digest) == "$before" ]]
+[[ $(cat "$XDG_RUNTIME_DIR/proxycode/keep") == 'unrelated runtime data' ]]
 step 'restore preserved profile' bash "$installer" --install-only
 [[ $(profile_digest) == "$before" ]]
 step 'purge' bash "$installer" --purge --yes
 [[ ! -e $cli ]]
-for directory in "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$XDG_RUNTIME_DIR"; do
+for directory in "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"; do
   [[ ! -e $directory/proxycode ]]
 done
+[[ $(cat "$XDG_RUNTIME_DIR/proxycode/keep") == 'unrelated runtime data' ]]
 cmp -s -- "$PROXYCODE_SMOKE_WG_CONFIG" "$sandbox/source.conf"
 printf 'Passed: preservation, purge, original source unchanged, process and listener cleanup.\n'

@@ -118,8 +118,10 @@ proxycode codex
   → launch Codex with local HTTP proxy variables
 ```
 
-A wrapped command leaves the tunnel running when it exits. Reusing an active
-tunnel does not repeat the startup check; use `proxycode check` to check it again.
+Exiting a wrapped command, pressing Ctrl-C, or disconnecting SSH leaves the
+tunnel running. Use `proxycode stop` to stop it. Process tracking persists across
+sessions. Reusing an active tunnel does not repeat the startup check; use
+`proxycode check` to check it again.
 If another profile is active, wrapping refuses to switch it silently.
 
 ```bash
@@ -201,16 +203,15 @@ After uninstall, rerunning `--install-only` makes the preserved profiles usable.
 
 ## Private files and troubleshooting
 
-Default locations are below; `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`
-and `XDG_RUNTIME_DIR` override the corresponding roots.
+Default locations are below; `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and
+`XDG_STATE_HOME` override the corresponding roots.
 
 | Location | Contents |
 | --- | --- |
 | `~/.local/bin/proxycode` | Installed command |
 | `~/.config/proxycode/` | Listener settings and default profile |
 | `~/.local/share/proxycode/` | WireProxy, its ISC notice, library and private profiles |
-| `~/.local/state/proxycode/` | Installation metadata and profile logs |
-| `$XDG_RUNTIME_DIR/proxycode/` | Active process state; falls back to the state directory |
+| `~/.local/state/proxycode/` | Installation metadata, active process state and profile logs |
 
 Managed directories and executables are owner-only (`0700`); private files are
 `0600`. Do not publish profile files, proxy environment values or logs. Logs are

@@ -69,7 +69,8 @@ install --install-only → settings --http-port → profile import --default
 ```
 
 It also verifies pinned-binary installation, rejects an unauthenticated proxy
-request, checks the process/listener/active-state cleanup, and confirms the
+request, verifies tracking after session runtime storage disappears, checks
+process/listener/active-state cleanup, and confirms the
 original input was untouched. Command output stays in a private temporary
 directory and is removed after the run. If safe stop cannot be verified, the
 script retains that directory and reports its path for local recovery.

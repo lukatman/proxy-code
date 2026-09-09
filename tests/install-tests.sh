@@ -153,7 +153,7 @@ test_reinstall_preserves_user_data_and_refuses_active() {
   export FAKE_CURL_CALLS=$TEST_HOME/curl-calls WIREPROXY_START_LOG=$TEST_HOME/wireproxy-starts
   PATH=$TEST_HOME/lifecycle-fakes:$SYSTEM_PATH
   "$cli" start work >/dev/null || { fail 'reinstall Active Profile starts'; return; }
-  pid=$(sed -n 's/^PID=//p' "$XDG_RUNTIME_DIR/proxycode/active")
+  pid=$(sed -n 's/^PID=//p' "$XDG_STATE_HOME/proxycode/active")
   fake_wireproxy "$TEST_HOME/custom/new-wireproxy" 1.2.0
 
   before=$(installation_digest)
@@ -217,6 +217,8 @@ test_uninstall_preserves_and_purge_deletes() {
   new_home
   install_custom_binary >/dev/null || { fail 'removal baseline succeeds'; return; }
   local cli=$HOME/.local/bin/proxycode source=$TEST_HOME/source/work.conf profile password preserved output status pid
+  mkdir -p "$XDG_RUNTIME_DIR/proxycode"
+  printf 'unrelated runtime data\n' >"$XDG_RUNTIME_DIR/proxycode/keep"
   write_wireguard_config "$source"
   "$cli" profile import "$source" --name work --default >/dev/null || { fail 'removal work Profile import succeeds'; return; }
   "$cli" profile import "$source" --name travel >/dev/null || { fail 'removal travel Profile import succeeds'; return; }
@@ -231,7 +233,7 @@ test_uninstall_preserves_and_purge_deletes() {
   export FAKE_CURL_CALLS=$TEST_HOME/curl-calls WIREPROXY_START_LOG=$TEST_HOME/wireproxy-starts
   PATH=$TEST_HOME/lifecycle-fakes:$SYSTEM_PATH
   "$cli" start work >/dev/null || { fail 'uninstall Active Profile starts'; return; }
-  pid=$(sed -n 's/^PID=//p' "$XDG_RUNTIME_DIR/proxycode/active")
+  pid=$(sed -n 's/^PID=//p' "$XDG_STATE_HOME/proxycode/active")
   preserved=$(/usr/bin/sha256sum "$XDG_CONFIG_HOME/proxycode/settings" "$XDG_DATA_HOME/proxycode/profiles/"*/*)
 
   output=$(bash "$ROOT/install.sh" --uninstall 2>&1)
@@ -243,9 +245,10 @@ test_uninstall_preserves_and_purge_deletes() {
   output=$(bash "$ROOT/install.sh" --uninstall --yes) || { fail 'confirmed uninstall succeeds'; return; }
   [[ $output == *'Stopped Tunnel Profile: work'* && $output == *'preserved'* ]] || fail 'uninstall does not report verified stop and preservation'
   [[ ! -e /proc/$pid && ! -e $cli && ! -e $XDG_DATA_HOME/proxycode/bin && ! -e $XDG_DATA_HOME/proxycode/lib && ! -e $XDG_DATA_HOME/proxycode/licenses ]] || fail 'uninstall leaves managed executables or libraries'
-  [[ ! -e $XDG_STATE_HOME/proxycode && ! -e $XDG_RUNTIME_DIR/proxycode ]] || fail 'uninstall leaves logs, metadata, or runtime state'
+  [[ ! -e $XDG_STATE_HOME/proxycode ]] || fail 'uninstall leaves logs, metadata, or runtime state'
   assert_eq "$preserved" "$(/usr/bin/sha256sum "$XDG_CONFIG_HOME/proxycode/settings" "$XDG_DATA_HOME/proxycode/profiles/"*/*)" 'uninstall changes settings, Profiles, or Proxy credentials'
   [[ -f $source ]] || fail 'uninstall touches an original WireGuard source'
+  assert_eq 'unrelated runtime data' "$(cat "$XDG_RUNTIME_DIR/proxycode/keep")" 'uninstall changes unrelated runtime data'
 
   PATH=$SYSTEM_PATH
   bash "$ROOT/install.sh" --install-only --wireproxy-bin "$TEST_HOME/custom/wireproxy" >/dev/null || { fail 'reinstall after uninstall succeeds'; return; }
@@ -264,11 +267,12 @@ test_uninstall_preserves_and_purge_deletes() {
   export EXPECTED_WIREPROXY_EXE
   PATH=$TEST_HOME/lifecycle-fakes:$SYSTEM_PATH
   "$cli" start work >/dev/null || { fail 'purge Active Profile starts'; return; }
-  pid=$(sed -n 's/^PID=//p' "$XDG_RUNTIME_DIR/proxycode/active")
+  pid=$(sed -n 's/^PID=//p' "$XDG_STATE_HOME/proxycode/active")
   output=$(bash "$ROOT/install.sh" --purge --yes) || { fail 'confirmed purge succeeds'; return; }
   [[ $output == *'travel'* && $output == *'work'* && $output == *'Stopped Tunnel Profile: work'* ]] || fail 'purge does not report affected Profiles and verified stop'
-  [[ ! -e /proc/$pid && ! -e $cli && ! -e $XDG_CONFIG_HOME/proxycode && ! -e $XDG_DATA_HOME/proxycode && ! -e $XDG_STATE_HOME/proxycode && ! -e $XDG_RUNTIME_DIR/proxycode ]] || fail 'purge leaves Toolkit data or process behind'
+  [[ ! -e /proc/$pid && ! -e $cli && ! -e $XDG_CONFIG_HOME/proxycode && ! -e $XDG_DATA_HOME/proxycode && ! -e $XDG_STATE_HOME/proxycode ]] || fail 'purge leaves Toolkit data or process behind'
   [[ -f $source ]] || fail 'purge touches an original WireGuard source'
+  assert_eq 'unrelated runtime data' "$(cat "$XDG_RUNTIME_DIR/proxycode/keep")" 'purge changes unrelated runtime data'
 }
 
 test_maintenance_process_safety_and_binary_drift() {
@@ -278,7 +282,7 @@ test_maintenance_process_safety_and_binary_drift() {
   local cli=$HOME/.local/bin/proxycode source=$TEST_HOME/source/work.conf state stat rest shell_started before output status unrelated password pid
   write_wireguard_config "$source"
   "$cli" profile import "$source" --name work --default >/dev/null || { fail 'maintenance safety Profile import succeeds'; return; }
-  state=$XDG_RUNTIME_DIR/proxycode/active
+  state=$XDG_STATE_HOME/proxycode/active
   IFS= read -r stat <"/proc/$$/stat"
   rest=${stat##*) }
   # /proc stat fields after the command name are whitespace-separated numbers.
@@ -327,7 +331,7 @@ test_maintenance_process_safety_and_binary_drift() {
 test_overlapping_roots_refuse_changes() {
   TESTS=$((TESTS + 1))
   new_home
-  export XDG_CONFIG_HOME=$TEST_HOME/shared XDG_DATA_HOME=$TEST_HOME/shared XDG_STATE_HOME=$TEST_HOME/shared XDG_RUNTIME_DIR=$TEST_HOME/shared
+  export XDG_CONFIG_HOME=$TEST_HOME/shared XDG_DATA_HOME=$TEST_HOME/shared XDG_STATE_HOME=$TEST_HOME/shared
   local profile=$TEST_HOME/shared/proxycode/profiles/work output status
   mkdir -p "$profile"
   printf 'preserve me\n' >"$profile/wireguard.conf"
@@ -372,7 +376,7 @@ EOF
   fi
   output=$(<"$TEST_HOME/queued.out")
   [[ $output == *'installation changed while waiting'* ]] || fail 'queued CLI lacks maintenance-race guidance'
-  [[ ! -e $XDG_CONFIG_HOME/proxycode && ! -e $XDG_DATA_HOME/proxycode && ! -e $XDG_STATE_HOME/proxycode && ! -e $XDG_RUNTIME_DIR/proxycode ]] || fail 'queued CLI recreates Toolkit data during purge'
+  [[ ! -e $XDG_CONFIG_HOME/proxycode && ! -e $XDG_DATA_HOME/proxycode && ! -e $XDG_STATE_HOME/proxycode ]] || fail 'queued CLI recreates Toolkit data during purge'
 }
 
 test_symlinked_managed_source_is_rejected_and_preserved() {
@@ -420,13 +424,12 @@ test_invalid_install_and_runtime_residue_cleanup() {
   output=$(bash "$ROOT/install.sh" --install-only --wireproxy-bin "$invalid" 2>&1)
   status=$?
   assert_eq 1 "$status" 'invalid custom binary status'
-  [[ ! -e $HOME/.local/bin/proxycode && ! -e $XDG_CONFIG_HOME/proxycode && ! -e $XDG_DATA_HOME/proxycode && ! -e $XDG_STATE_HOME/proxycode && ! -e $XDG_RUNTIME_DIR/proxycode ]] || fail 'failed validation changes live Toolkit state'
+  [[ ! -e $HOME/.local/bin/proxycode && ! -e $XDG_CONFIG_HOME/proxycode && ! -e $XDG_DATA_HOME/proxycode && ! -e $XDG_STATE_HOME/proxycode ]] || fail 'failed validation changes live Toolkit state'
 
   install_custom_binary >/dev/null || { fail 'runtime residue baseline succeeds'; return; }
-  mkdir -p "$XDG_RUNTIME_DIR/proxycode"
-  printf 'interrupted probe\n' >"$XDG_RUNTIME_DIR/proxycode/probe.abandoned"
+  printf 'interrupted probe\n' >"$XDG_STATE_HOME/proxycode/probe.abandoned"
   bash "$ROOT/install.sh" --uninstall --yes >/dev/null || { fail 'runtime residue uninstall succeeds'; return; }
-  [[ ! -e $XDG_RUNTIME_DIR/proxycode ]] || fail 'uninstall reports success with runtime residue'
+  [[ ! -e $XDG_STATE_HOME/proxycode ]] || fail 'uninstall reports success with runtime residue'
 }
 
 test_unsupported_platform_changes_nothing() {

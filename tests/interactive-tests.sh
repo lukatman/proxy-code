@@ -154,7 +154,7 @@ $binary
   [[ $output == *'health check failed'* && $output == *"retry 'proxycode start work'"* ]] || fail 'interactive activation failure lacks recovery guidance'
   assert_eq 1 "$(<"$FAKE_CURL_CALLS")" 'interactive activation failure reaches the intended health probe'
   [[ -d $XDG_DATA_HOME/proxycode/profiles/work ]] || fail 'activation failure loses the imported Profile'
-  [[ ! -e $XDG_RUNTIME_DIR/proxycode/active ]] || fail 'activation failure leaves the Profile active'
+  [[ ! -e $XDG_STATE_HOME/proxycode/active ]] || fail 'activation failure leaves the Profile active'
 }
 
 test_interactive_setup_rejects_early_and_resolves_profile_collision() {
@@ -327,7 +327,7 @@ EOF
       sleep 0.02
     done
     [[ -e $TEST_HOME/ready ]] || { fail 'installer reaches staged Profile validation'; exit 1; }
-    assert_status 1 'staging retains the live lifecycle directory lock' flock -n "$XDG_RUNTIME_DIR" true
+    assert_status 1 'staging retains the live lifecycle directory lock' flock -n "$XDG_STATE_HOME" true
     touch "$TEST_HOME/release"
     wait "$installer"; status=$?
     installer=

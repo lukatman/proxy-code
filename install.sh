@@ -171,11 +171,10 @@ proxycode_init_paths || exit 1
 live_config_dir=$PROXYCODE_CONFIG_DIR
 live_data_dir=$PROXYCODE_DATA_DIR
 live_state_dir=$PROXYCODE_STATE_DIR
-live_runtime_dir=$PROXYCODE_RUNTIME_DIR
 
 acquire_lifecycle_lock() {
-  mkdir -p "${PROXYCODE_RUNTIME_DIR%/*}" || die 'cannot create the lifecycle lock directory'
-  exec {INSTALL_LOCK_FD}<"${PROXYCODE_RUNTIME_DIR%/*}" || die 'cannot open the lifecycle lock'
+  mkdir -p "${PROXYCODE_STATE_DIR%/*}" || die 'cannot create the lifecycle lock directory'
+  exec {INSTALL_LOCK_FD}<"${PROXYCODE_STATE_DIR%/*}" || die 'cannot open the lifecycle lock'
   flock -x "$INSTALL_LOCK_FD" || die 'cannot acquire the lifecycle lock'
 }
 
@@ -201,9 +200,9 @@ if [[ $mode == uninstall || $mode == purge ]]; then
   [[ $PROXYCODE_ACTIVE_STATUS == stopped ]] || proxycode_stop_locked || die 'could not safely stop the Active Tunnel Profile'
   rm -f -- "$PROXYCODE_BIN_DIR/proxycode" || die 'could not remove the Toolkit command'
   if [[ $mode == purge ]]; then
-    rm -rf -- "$PROXYCODE_CONFIG_DIR" "$PROXYCODE_DATA_DIR" "$PROXYCODE_STATE_DIR" "$PROXYCODE_RUNTIME_DIR" || die 'could not purge Toolkit data'
+    rm -rf -- "$PROXYCODE_CONFIG_DIR" "$PROXYCODE_DATA_DIR" "$PROXYCODE_STATE_DIR" || die 'could not purge Toolkit data'
   else
-    rm -rf -- "${PROXYCODE_DATA_DIR:?}/bin" "${PROXYCODE_DATA_DIR:?}/lib" "$PROXYCODE_DATA_DIR/licenses" "$PROXYCODE_STATE_DIR" "$PROXYCODE_RUNTIME_DIR" || die 'could not remove installed Toolkit files'
+    rm -rf -- "${PROXYCODE_DATA_DIR:?}/bin" "${PROXYCODE_DATA_DIR:?}/lib" "$PROXYCODE_DATA_DIR/licenses" "$PROXYCODE_STATE_DIR" || die 'could not remove installed Toolkit files'
   fi
   if [[ $mode == purge ]]; then
     printf 'Purged the Toolkit.\n'
@@ -458,7 +457,7 @@ if [[ $mode == profile ]]; then
   proxycode_validate_profile_name "$name" || die "invalid Tunnel Profile name '$name'" 2
   [[ -f $wg_config && -r $wg_config ]] || die "cannot read WireGuard configuration '$wg_config'" 2
   source_file=$(readlink -f "$wg_config") || die 'cannot resolve the WireGuard configuration' 2
-  for managed_root in "$live_config_dir" "$live_data_dir" "$live_state_dir" "$live_runtime_dir"; do
+  for managed_root in "$live_config_dir" "$live_data_dir" "$live_state_dir"; do
     managed_root=$(readlink -m "$managed_root") || die 'cannot resolve a Toolkit directory'
     case $source_file in
       "$managed_root"|"$managed_root"/*) die 'the original WireGuard configuration must be outside Toolkit-managed directories' 2 ;;
@@ -472,12 +471,12 @@ if [[ $mode == profile ]]; then
 
   (
     export HOME=$work_dir/setup/home
-    export XDG_CONFIG_HOME=$work_dir/setup/config XDG_DATA_HOME=$work_dir/setup/data XDG_STATE_HOME=$work_dir/setup/state XDG_RUNTIME_DIR=$work_dir/setup/runtime
-    mkdir -p "$HOME" "$XDG_RUNTIME_DIR" || die 'cannot prepare Profile staging'
+    export XDG_CONFIG_HOME=$work_dir/setup/config XDG_DATA_HOME=$work_dir/setup/data XDG_STATE_HOME=$work_dir/setup/state
+    mkdir -p "$HOME" || die 'cannot prepare Profile staging'
     proxycode_init_paths || die 'cannot initialize Profile staging'
     proxycode_prepare_storage || die 'cannot prepare Profile staging'
-    mkdir -p "$PROXYCODE_DATA_DIR/bin" "$PROXYCODE_STATE_DIR" "$PROXYCODE_RUNTIME_DIR" || die 'cannot prepare Profile staging'
-    chmod 700 "$PROXYCODE_DATA_DIR/bin" "$PROXYCODE_STATE_DIR" "$PROXYCODE_RUNTIME_DIR" || die 'cannot secure Profile staging'
+    mkdir -p "$PROXYCODE_DATA_DIR/bin" "$PROXYCODE_STATE_DIR" || die 'cannot prepare Profile staging'
+    chmod 700 "$PROXYCODE_DATA_DIR/bin" "$PROXYCODE_STATE_DIR" || die 'cannot secure Profile staging'
     cp -- "$work_dir/payload/wireproxy" "$PROXYCODE_DATA_DIR/bin/wireproxy" || die 'cannot stage WireProxy for Profile validation'
     if [[ -r $live_config_dir/settings ]]; then
       cp -- "$live_config_dir/settings" "$PROXYCODE_CONFIG_DIR/settings" || die 'cannot stage listener settings'

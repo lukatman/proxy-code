@@ -13,7 +13,7 @@ PROXYCODE_MUTED=$'\033[38;2;113;113;122m'
 PROXYCODE_RESET=$'\033[0m'
 
 proxycode_init_paths() {
-  local home_root config_root data_root state_root runtime_root
+  local home_root config_root data_root state_root
   if [[ ${HOME:-} != /* || $HOME == / ]]; then
     printf 'proxycode: HOME must be an absolute user directory\n' >&2
     return 1
@@ -23,30 +23,21 @@ proxycode_init_paths() {
   PROXYCODE_CONFIG_DIR=$(proxycode_xdg_path "${XDG_CONFIG_HOME:-}" "$HOME/.config")/proxycode
   PROXYCODE_DATA_DIR=$(proxycode_xdg_path "${XDG_DATA_HOME:-}" "$HOME/.local/share")/proxycode
   PROXYCODE_STATE_DIR=$(proxycode_xdg_path "${XDG_STATE_HOME:-}" "$HOME/.local/state")/proxycode
-  if [[ ${XDG_RUNTIME_DIR:-} == /* && $XDG_RUNTIME_DIR != / ]]; then
-    PROXYCODE_RUNTIME_DIR=$XDG_RUNTIME_DIR/proxycode
-  else
-    PROXYCODE_RUNTIME_DIR=$PROXYCODE_STATE_DIR
-  fi
 
   home_root=$(readlink -m "$HOME") || return 1
   config_root=$(readlink -m "$PROXYCODE_CONFIG_DIR") || return 1
   data_root=$(readlink -m "$PROXYCODE_DATA_DIR") || return 1
   state_root=$(readlink -m "$PROXYCODE_STATE_DIR") || return 1
-  runtime_root=$(readlink -m "$PROXYCODE_RUNTIME_DIR") || return 1
   case "$home_root/" in
-    "$config_root/"*|"$data_root/"*|"$state_root/"*|"$runtime_root/"*)
+    "$config_root/"*|"$data_root/"*|"$state_root/"*)
       proxycode_error 'an XDG Toolkit directory cannot contain HOME; use non-overlapping XDG paths'
       return
       ;;
   esac
   if proxycode_paths_overlap "$config_root" "$data_root" ||
     proxycode_paths_overlap "$config_root" "$state_root" ||
-    proxycode_paths_overlap "$config_root" "$runtime_root" ||
-    proxycode_paths_overlap "$data_root" "$state_root" ||
-    proxycode_paths_overlap "$data_root" "$runtime_root" ||
-    { [[ $state_root != "$runtime_root" ]] && proxycode_paths_overlap "$state_root" "$runtime_root"; }; then
-    proxycode_error 'XDG Toolkit directories overlap; use separate config, data, state, and runtime paths'
+    proxycode_paths_overlap "$data_root" "$state_root"; then
+    proxycode_error 'XDG Toolkit directories overlap; use separate config, data, and state paths'
     return
   fi
 }
@@ -470,7 +461,7 @@ proxycode_profile_remove() {
 }
 
 proxycode_profile_import() {
-  local source_file=$1 name=$2 make_default=$3 replace=$4 yes=$5 profile stage password backup config_root data_root state_root runtime_root existed=false
+  local source_file=$1 name=$2 make_default=$3 replace=$4 yes=$5 profile stage password backup config_root data_root state_root existed=false
   proxycode_load_global_settings || return
   profile=$(proxycode_profile_path "$name") || { proxycode_error "invalid Tunnel Profile name '$name'" 2; return; }
   [[ -f $source_file && -r $source_file ]] || { proxycode_error "cannot read WireGuard configuration '$source_file'" 2; return; }
@@ -478,9 +469,8 @@ proxycode_profile_import() {
   config_root=$(readlink -f "$PROXYCODE_CONFIG_DIR") || return 1
   data_root=$(readlink -f "$PROXYCODE_DATA_DIR") || return 1
   state_root=$(readlink -f "$PROXYCODE_STATE_DIR") || return 1
-  runtime_root=$(readlink -f "$PROXYCODE_RUNTIME_DIR") || return 1
   case $source_file in
-    "$config_root"|"$config_root"/*|"$data_root"|"$data_root"/*|"$state_root"|"$state_root"/*|"$runtime_root"|"$runtime_root"/*)
+    "$config_root"|"$config_root"/*|"$data_root"|"$data_root"/*|"$state_root"|"$state_root"/*)
       proxycode_error 'the original WireGuard configuration must be outside Toolkit-managed directories' 2
       return
       ;;
@@ -559,8 +549,8 @@ EOF
 
 proxycode_prepare_lifecycle() {
   proxycode_load_global_settings || return
-  mkdir -p "$PROXYCODE_RUNTIME_DIR" "$PROXYCODE_STATE_DIR/logs" || return 1
-  chmod 700 "$PROXYCODE_RUNTIME_DIR" "$PROXYCODE_STATE_DIR" "$PROXYCODE_STATE_DIR/logs" || return 1
+  mkdir -p "$PROXYCODE_STATE_DIR" "$PROXYCODE_STATE_DIR/logs" || return 1
+  chmod 700 "$PROXYCODE_STATE_DIR" "$PROXYCODE_STATE_DIR/logs" || return 1
 }
 
 proxycode_with_lifecycle_lock() {
@@ -568,8 +558,8 @@ proxycode_with_lifecycle_lock() {
   shift
   unset PROXYCODE_LOCK_FD
   proxycode_init_paths || return
-  mkdir -p "${PROXYCODE_RUNTIME_DIR%/*}" || return 1
-  exec {PROXYCODE_LOCK_FD}<"${PROXYCODE_RUNTIME_DIR%/*}" || return 1
+  mkdir -p "${PROXYCODE_STATE_DIR%/*}" || return 1
+  exec {PROXYCODE_LOCK_FD}<"${PROXYCODE_STATE_DIR%/*}" || return 1
   if ! flock -x "$PROXYCODE_LOCK_FD"; then
     status=1
   elif [[ ! -x $PROXYCODE_BIN_DIR/proxycode || ! -r $PROXYCODE_DATA_DIR/lib/proxycode.sh || ! -r $PROXYCODE_STATE_DIR/install ]]; then
@@ -624,7 +614,7 @@ proxycode_wait_for_process_match() {
 }
 
 proxycode_inspect_active() {
-  local state=$PROXYCODE_RUNTIME_DIR/active expected_executable expected_config observed_start ready
+  local state=$PROXYCODE_STATE_DIR/active expected_executable expected_config observed_start ready
   PROXYCODE_ACTIVE_STATUS=stopped
   PROXYCODE_ACTIVE_PROFILE='' PROXYCODE_ACTIVE_PID='' PROXYCODE_ACTIVE_STARTED=''
   [[ -e $state ]] || return 0
@@ -678,7 +668,7 @@ proxycode_rotate_log() {
 }
 
 proxycode_ambiguous_guidance() {
-  printf "Confirm no WireProxy process owns the configured ports, then remove '%s' and retry.\n" "$PROXYCODE_RUNTIME_DIR/active" >&2
+  printf "Confirm no WireProxy process owns the configured ports, then remove '%s' and retry.\n" "$PROXYCODE_STATE_DIR/active" >&2
 }
 
 proxycode_interpret_probe() {
@@ -724,7 +714,7 @@ proxycode_probe_once() {
       ;;
     *) return 1 ;;
   esac
-  body=$(mktemp "$PROXYCODE_RUNTIME_DIR/probe.XXXXXX") || return 1
+  body=$(mktemp "$PROXYCODE_STATE_DIR/probe.XXXXXX") || return 1
   if chmod 600 "$body"; then
     http_status=$(curl --disable --silent --max-filesize 65536 --max-time "$timeout_seconds" --output "$body" --write-out '%{http_code}' "$url" 2>/dev/null) || curl_status=$?
     proxycode_interpret_probe "$probe" "$expectation" "$expected_status" "$contains" "$body" "$http_status" "$curl_status"
@@ -735,7 +725,7 @@ proxycode_probe_once() {
 }
 
 proxycode_write_active_state() {
-  proxycode_write_private "$PROXYCODE_RUNTIME_DIR/active" <<EOF
+  proxycode_write_private "$PROXYCODE_STATE_DIR/active" <<EOF
 PROFILE=$1
 PID=$2
 START_TIME=$3
@@ -820,14 +810,14 @@ proxycode_start_locked() {
     sleep 0.1
   done
   if [[ -z ${started:-} ]]; then
-    [[ -e /proc/$pid ]] || rm -f -- "$PROXYCODE_RUNTIME_DIR/active"
+    [[ -e /proc/$pid ]] || rm -f -- "$PROXYCODE_STATE_DIR/active"
     proxycode_error 'WireProxy process identity could not be read; ambiguous state was retained if it may still be running'
     return
   fi
   if ! proxycode_write_active_state "$name" "$pid" "$started" 0; then
     if proxycode_wait_for_process_match "$pid" "$started" "$executable" "$config" &&
       proxycode_terminate_verified "$pid" "$started" "$executable" "$config"; then
-      rm -f -- "$PROXYCODE_RUNTIME_DIR/active"
+      rm -f -- "$PROXYCODE_STATE_DIR/active"
     else
       proxycode_error 'could not record or safely clean up the new WireProxy process; ambiguous state was retained'
     fi
@@ -840,7 +830,7 @@ proxycode_start_locked() {
   if ! proxycode_run_probe "$profile" 30 5 true; then
     printf 'Location: %s\n' "${PROXYCODE_PROBE_LOCATION:-unavailable}"
     if proxycode_terminate_verified "$pid" "$started" "$executable" "$config"; then
-      rm -f -- "$PROXYCODE_RUNTIME_DIR/active"
+      rm -f -- "$PROXYCODE_STATE_DIR/active"
       proxycode_error 'Tunnel Profile health check failed; WireProxy was stopped'
     else
       proxycode_error 'Tunnel Profile health check failed; cleanup could not be verified and active state was retained'
@@ -854,7 +844,7 @@ proxycode_start_locked() {
   fi
   if ! proxycode_write_active_state "$name" "$pid" "$started" 1; then
     if proxycode_terminate_verified "$pid" "$started" "$executable" "$config"; then
-      rm -f -- "$PROXYCODE_RUNTIME_DIR/active"
+      rm -f -- "$PROXYCODE_STATE_DIR/active"
     else
       proxycode_error 'could not finalize activation; ambiguous state was retained'
     fi
@@ -924,7 +914,7 @@ proxycode_stop_locked() {
   config=$(proxycode_profile_path "$name")/wireproxy.conf
   proxycode_rotate_log "$name" || { proxycode_error 'could not rotate the WireProxy log'; return; }
   proxycode_terminate_verified "$pid" "$started" "$executable" "$config" || { proxycode_error 'WireProxy could not be stopped without risking another process'; return; }
-  rm -f -- "$PROXYCODE_RUNTIME_DIR/active" || return 1
+  rm -f -- "$PROXYCODE_STATE_DIR/active" || return 1
   printf 'Stopped Tunnel Profile: %s\n' "$name"
 }
 
