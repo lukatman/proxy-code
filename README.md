@@ -8,25 +8,27 @@ an authenticated local HTTP proxy.
 ## Install
 
 You need a WireGuard configuration from your provider or your own server.
-Replace the configuration path below with yours. Run as your normal user, without
-`sudo`:
+Run the interactive installer as your normal user, without `sudo`:
 
 ```bash
 setup_dir=$(mktemp -d)
 curl --proto '=https' --tlsv1.2 -fL \
   https://github.com/lukatman/proxycode/releases/download/v0.1.0/install.sh \
   -o "$setup_dir/install.sh"
-bash "$setup_dir/install.sh" \
-  --wg-config "$HOME/Downloads/tunnel.conf" --name work --default
+bash "$setup_dir/install.sh"
 export PATH="$HOME/.local/bin:$PATH"
 proxycode start
 proxycode codex
 ```
 
-The installer downloads a fixed ProxyCode bundle and verifies its release
+The installer asks for your configuration, profile name and preferences, then
+shows a review before installation. Choose a default profile to use with commands
+such as `proxycode codex`. You can start and check the tunnel during setup, or
+use `proxycode start` afterward.
+
+It downloads a fixed ProxyCode bundle and verifies its release
 checksum, then downloads WireProxy **1.1.3** and checks the SHA-256 pinned in the
-installer. It copies your configuration into private storage. The flag-based
-installation does not start the tunnel; `start` does that and checks HTTPS egress.
+installer, then copies your configuration into private storage.
 
 Keep the downloaded installer for the maintenance examples below. When finished,
 remove it with `rm -rf -- "$setup_dir"`. Add `~/.local/bin` to your shell's PATH if
@@ -47,14 +49,17 @@ WSL and containers are not supported targets.
 
 ### Other installation options
 
-For interactive setup, run the downloaded installer without arguments:
+For flag-based setup, use the downloaded installer with your configuration path
+and a profile name:
 
 ```bash
-bash "$setup_dir/install.sh"
+bash "$setup_dir/install.sh" \
+  --wg-config "$HOME/Downloads/tunnel.conf" --name work --default
+proxycode start
 ```
 
-It asks for your configuration, profile name and preferences, then shows a review
-before installation. To install first and import a profile later:
+Flag-based installation does not start the tunnel; `start` does that and checks
+HTTPS egress. To install first and import a profile later:
 
 ```bash
 bash "$setup_dir/install.sh" --install-only
