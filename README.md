@@ -11,14 +11,18 @@ You need a WireGuard configuration from your provider or your own server.
 Run the interactive installer as your normal user, without `sudo`:
 
 ```bash
-setup_dir=$(mktemp -d)
-curl --proto '=https' --tlsv1.2 -fL \
-  https://github.com/lukatman/proxycode/releases/download/v0.1.0/install.sh \
-  -o "$setup_dir/install.sh"
-bash "$setup_dir/install.sh"
-export PATH="$HOME/.local/bin:$PATH"
+curl -fL "https://github.com/lukatman/proxycode/releases/download/v0.1.0/install.sh" \
+  -o install.sh && bash install.sh
+
 proxycode start
 proxycode codex
+```
+
+If `proxycode` isn’t found, add this line to your shell configuration
+(`~/.bashrc` for Bash), then open a new terminal:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
 The installer asks for your configuration, profile name and preferences, then
@@ -30,30 +34,17 @@ It downloads a fixed ProxyCode bundle and verifies its release
 checksum, then downloads WireProxy **1.1.3** and checks the SHA-256 pinned in the
 installer, then copies your configuration into private storage.
 
-Keep the downloaded installer for the maintenance examples below. When finished,
-remove it with `rm -rf -- "$setup_dir"`. Add `~/.local/bin` to your shell's PATH if
-it is not already there; the installer does not edit shell configuration.
+Keep `install.sh` for the maintenance examples below, or delete it after setup.
+The installer does not edit shell configuration.
 
-### Requirements
-
-- Linux x86-64 or ARM64, Bash 4.4 or newer, readable `/proc`, and writable user/XDG
-  directories. CI runs on Ubuntu 24.04 for both architectures.
-- `curl` with HTTPS support and CA certificates, `flock` from util-linux, `tar`,
-  GNU coreutils, `awk`, `grep`, and `sed`. Missing commands are reported by the
-  installer; install them with your distribution's package manager.
-- Loopback networking, access to GitHub over HTTPS, and outbound connectivity to
-  your WireGuard endpoint and health-check URL.
-
-There is no system VPN interface, service or automatic startup. macOS, Windows,
-WSL and containers are not supported targets.
-
-### Other installation options
+<details>
+<summary><strong>Other installation options</strong></summary>
 
 For flag-based setup, use the downloaded installer with your configuration path
 and a profile name:
 
 ```bash
-bash "$setup_dir/install.sh" \
+bash install.sh \
   --wg-config "$HOME/Downloads/tunnel.conf" --name work --default
 proxycode start
 ```
@@ -62,7 +53,7 @@ Flag-based installation does not start the tunnel; `start` does that and checks
 HTTPS egress. To install first and import a profile later:
 
 ```bash
-bash "$setup_dir/install.sh" --install-only
+bash install.sh --install-only
 proxycode profile import "$HOME/Downloads/tunnel.conf" --name work --default
 ```
 
@@ -91,8 +82,22 @@ bash install.sh --wg-config "$HOME/Downloads/tunnel.conf" --name work --default
 An optional `--wireproxy-bin /absolute/path/to/wireproxy` installs a binary you
 provide. It checks compatibility, but does not verify that binary against the
 pinned release checksum.
+</details>
 
-## Use
+### Requirements
+
+- Linux x86-64 or ARM64, Bash 4.4 or newer, readable `/proc`, and writable user/XDG
+  directories. CI runs on Ubuntu 24.04 for both architectures.
+- `curl` with HTTPS support and CA certificates, `flock` from util-linux, `tar`,
+  GNU coreutils, `awk`, `grep`, and `sed`. Missing commands are reported by the
+  installer; install them with your distribution's package manager.
+- Loopback networking, access to GitHub over HTTPS, and outbound connectivity to
+  your WireGuard endpoint and health-check URL.
+
+There is no system VPN interface, service or automatic startup. macOS, Windows,
+WSL and containers are not supported targets.
+
+## Usage
 
 ```bash
 proxycode                    # Open the management menu
@@ -158,7 +163,7 @@ proxycode profile settings work --probe custom \
   --url https://example.com/health --status 200 --contains ready
 ```
 
-Run `proxycode help` for the full command syntax and `bash "$setup_dir/install.sh" --help` for
+Run `proxycode help` for the full command syntax and `bash install.sh --help` for
 installer options.
 
 ### Coding-agent limitations
@@ -185,7 +190,7 @@ that version's installer. Profiles, credentials and settings are preserved:
 
 ```bash
 proxycode stop
-bash "$setup_dir/install.sh" --install-only
+bash install.sh --install-only
 ```
 
 If you use your own WireProxy binary, pass `--wireproxy-bin` again; otherwise the
@@ -193,8 +198,8 @@ installer installs its pinned binary. An older installer refuses to downgrade an
 installation recorded as newer.
 
 ```bash
-bash "$setup_dir/install.sh" --uninstall   # Keep profiles, credentials and settings
-bash "$setup_dir/install.sh" --purge       # Remove all managed data
+bash install.sh --uninstall   # Keep profiles, credentials and settings
+bash install.sh --purge       # Remove all managed data
 ```
 
 Both operations stop the managed tunnel safely and ask for confirmation. Add
