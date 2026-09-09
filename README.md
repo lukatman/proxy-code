@@ -170,6 +170,12 @@ guarantee that every subprocess uses the tunnel. In particular, Codex stdio MCP
 servers and Claude background agents are not covered by the foreground CLI
 contract. See the [retained upstream references](docs/research/README.md).
 
+A CLI that connects to an existing background service does not change that
+service's proxy environment. For example, closing a Codex terminal can leave its
+shared app-server daemon running. Restart the service under the same proxy
+environment when changing proxies; wrapping only the new terminal client is
+not enough.
+
 ## Reinstall or remove
 
 To repair an installation or install a newer version, stop the tunnel and rerun
@@ -218,6 +224,7 @@ a log at 10 MiB, keeping one `.old` copy; this is not a continuous size limit.
 | Port already in use | Stop its owner or choose a free port with `proxycode settings`. |
 | Startup health check fails | Check the source configuration, endpoint connectivity, probe and expected location. Inspect the private log, then retry `start`. |
 | `check` fails | The tunnel remains running. Inspect the log and network, then stop/start if needed. |
+| `HTTP CONNECT` fails with `401` | The proxy rejected the credentials. Check for an older proxy or background service using different credentials on the same port. |
 | Process identity is ambiguous | Do not kill the recorded PID blindly. Verify which process owns the listener. Only after confirming no managed WireProxy remains, remove the `active` file at the path reported by `status` and retry. |
 | Missing or damaged installed files | Rerun the fixed-version installer after stopping the tunnel. |
 

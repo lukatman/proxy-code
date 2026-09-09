@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 
+# Expected command failures are asserted below, even when the caller exports errexit.
+set +e
 set -u
+
+# Only run_tty supplies a terminal; other tests assert noninteractive behavior.
+exec </dev/null
 
 ROOT=$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)
 SYSTEM_PATH=$PATH
@@ -215,8 +220,10 @@ fi
 EOF
   cat >"$TEST_HOME/lifecycle-fakes/timeout" <<'EOF'
 #!/usr/bin/env bash
-if [[ -n ${FAKE_PORT_BUSY:-} && ${1:-} == 1 && ${2:-} == bash ]]; then
-  exit 0
+if [[ ${1:-} == 1 && ${2:-} == bash ]]; then
+  # Lifecycle tests simulate the listener instead of probing the user's port.
+  [[ -n ${FAKE_PORT_BUSY:-} ]]
+  exit $?
 fi
 exec /usr/bin/timeout "$@"
 EOF

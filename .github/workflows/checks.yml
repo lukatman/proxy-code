@@ -25,4 +25,4 @@ jobs:
           done
           shellcheck -x -P SCRIPTDIR install.sh bin/proxycode lib/proxycode.sh tests/*.sh
       - name: Run isolated behavior tests
-        run: bash tests/test.sh
+        run: script -qec 'env SHELLOPTS=errexit bash tests/test.sh' /dev/null </dev/null

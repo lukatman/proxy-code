@@ -490,7 +490,7 @@ EOF
   assert_eq $'https://github.com/lukatman/proxycode/releases/download/v0.1.0/proxycode-0.1.0.tar.gz\nhttps://github.com/lukatman/proxycode/releases/download/v0.1.0/proxycode-0.1.0.tar.gz.sha256' "$(<"$BOOTSTRAP_URLS")" 'piped bootstrap uses fixed release assets'
 
   rm -f "$BOOTSTRAP_URLS"
-  output=$(cat "$ROOT/install.sh" | PATH=$TEST_HOME/bootstrap-fakes:$SYSTEM_PATH bash -s 2>&1)
+  output=$(cat "$ROOT/install.sh" | PATH=$TEST_HOME/bootstrap-fakes:$SYSTEM_PATH setsid --wait bash -s 2>&1)
   status=$?
   assert_eq 2 "$status" 'non-terminal piped setup status'
   [[ $output == *'complete setup flags'* ]] || fail 'non-terminal piped setup lacks complete-flags guidance'

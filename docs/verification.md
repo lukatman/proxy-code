@@ -1,7 +1,10 @@
-# Verification
+# Maintainer verification
+
+These checks are for development and release preparation. Installing and using
+ProxyCode does not require ShellCheck or running the test suite.
 
 Run from the repository root on Linux. The behavior suite needs the runtime
-dependencies in the README and util-linux's `script` for terminal tests.
+dependencies in the README and util-linux's `script` and `setsid` for terminal tests.
 ShellCheck is the only additional lint tool.
 
 ```bash
@@ -9,12 +12,15 @@ for file in install.sh bin/proxycode lib/proxycode.sh tests/*.sh; do
   bash -n "$file" || exit
 done
 shellcheck -x -P SCRIPTDIR install.sh bin/proxycode lib/proxycode.sh tests/*.sh
-bash tests/test.sh
+script -qec 'env SHELLOPTS=errexit bash tests/test.sh' /dev/null </dev/null
 ```
 
 [GitHub Actions](../.github/workflows/checks.yml) runs these same checks on
 `ubuntu-24.04` and `ubuntu-24.04-arm`. The suite exercises the installer and
-installed CLI with temporary HOME/XDG roots and fake external commands. It needs
+installed CLI with temporary HOME/XDG roots and fake external commands. CI starts
+it in a terminal with inherited `errexit` to check that expected failures and
+confirmation prompts cannot silently abort or hang the runner. For everyday
+local checks, `bash tests/test.sh` is enough. It needs
 no WireGuard account and does not use your installed tunnel.
 
 ## Real tunnel and release walkthrough
