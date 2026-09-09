@@ -226,6 +226,30 @@ proxycode_prompt() {
   done
 }
 
+proxycode_prompt_probe_settings() {
+  # Positional arguments for proxycode_profile_settings_update, after the name.
+  PROXYCODE_PROBE_SETTINGS=('' '' '' '' '')
+  proxycode_choose 'Health probe' 'Cloudflare' 'Mullvad' 'Custom HTTPS URL' || return 2
+  case $PROXYCODE_CHOICE in
+    1)
+      PROXYCODE_PROBE_SETTINGS[0]=cloudflare
+      proxycode_prompt 'Expected country code, or blank for any' || return 2
+      PROXYCODE_PROBE_SETTINGS[1]=$PROXYCODE_ANSWER
+      ;;
+    2)
+      PROXYCODE_PROBE_SETTINGS[0]=mullvad
+      proxycode_prompt 'Expected location, or blank for any' || return 2
+      PROXYCODE_PROBE_SETTINGS[1]=$PROXYCODE_ANSWER
+      ;;
+    3)
+      PROXYCODE_PROBE_SETTINGS[0]=custom
+      proxycode_prompt 'HTTPS probe URL' || return 2; PROXYCODE_PROBE_SETTINGS[2]=$PROXYCODE_ANSWER
+      proxycode_prompt 'Expected HTTP status' 200 || return 2; PROXYCODE_PROBE_SETTINGS[3]=$PROXYCODE_ANSWER
+      proxycode_prompt 'Required response text, or blank for any' || return 2; PROXYCODE_PROBE_SETTINGS[4]=$PROXYCODE_ANSWER
+      ;;
+  esac
+}
+
 proxycode_suggest_profile_name() {
   local suggestion=${1##*/}
   suggestion=${suggestion%.conf}
@@ -682,8 +706,37 @@ proxycode_ambiguous_guidance() {
   printf "Confirm no WireProxy process owns the configured ports, then remove '%s' and retry.\n" "$PROXYCODE_RUNTIME_DIR/active" >&2
 }
 
+proxycode_interpret_probe() {
+  local probe=$1 expectation=$2 expected_status=$3 contains=$4 body=$5 http_status=$6 curl_status=$7 location=
+  if ((curl_status != 0)); then
+    case $curl_status in
+      5|6|7|18|28|35|52|55|56|92) return 75 ;;
+      *) return 1 ;;
+    esac
+  fi
+  if ! { [[ $expected_status == 2xx && $http_status =~ ^2[0-9][0-9]$ ]] || [[ $expected_status != 2xx && $http_status == "$expected_status" ]]; }; then
+    [[ $http_status == 408 || $http_status == 429 || $http_status == 5* ]] && return 75 || return 1
+  fi
+  case $probe in
+    cloudflare)
+      grep -q '^ip=.' "$body" || return 1
+      location=$(sed -n 's/^loc=//p' "$body" | sed -n '1p')
+      PROXYCODE_PROBE_LOCATION=$location
+      [[ -z $expectation || $location == "$expectation" ]] || return 1
+      ;;
+    mullvad)
+      grep -Eq '"mullvad_exit_ip"[[:space:]]*:[[:space:]]*true' "$body" || return 1
+      location=$(sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$body" | sed -n '1p')
+      PROXYCODE_PROBE_LOCATION=$location
+      [[ -z $expectation || $location == "$expectation" ]] || return 1
+      ;;
+    custom) [[ -z $contains ]] || grep -Fq -- "$contains" "$body" || return 1 ;;
+  esac
+  PROXYCODE_PROBE_LOCATION=$location
+}
+
 proxycode_probe_once() {
-  local profile=$1 timeout_seconds=$2 probe expectation url expected_status contains body http_status curl_status location=
+  local profile=$1 timeout_seconds=$2 probe expectation url expected_status contains= body http_status curl_status=0 status=1
   probe=$(proxycode_read_setting "$profile/settings" PROBE)
   expectation=$(proxycode_read_setting "$profile/settings" EXPECT_LOCATION)
   case $probe in
@@ -697,40 +750,22 @@ proxycode_probe_once() {
     *) return 1 ;;
   esac
   body=$(mktemp "$PROXYCODE_RUNTIME_DIR/probe.XXXXXX") || return 1
-  chmod 600 "$body" || { rm -f -- "$body"; return 1; }
-  if http_status=$(curl --disable --silent --max-filesize 65536 --max-time "$timeout_seconds" --output "$body" --write-out '%{http_code}' "$url" 2>/dev/null); then
-    :
-  else
-    curl_status=$?
-    rm -f -- "$body"
-    case $curl_status in
-      5|6|7|18|28|35|52|55|56|92) return 75 ;;
-      *) return 1 ;;
-    esac
+  if chmod 600 "$body"; then
+    http_status=$(curl --disable --silent --max-filesize 65536 --max-time "$timeout_seconds" --output "$body" --write-out '%{http_code}' "$url" 2>/dev/null) || curl_status=$?
+    proxycode_interpret_probe "$probe" "$expectation" "$expected_status" "$contains" "$body" "$http_status" "$curl_status"
+    status=$?
   fi
-  if [[ $expected_status == 2xx ]]; then
-    [[ $http_status =~ ^2[0-9][0-9]$ ]] || { rm -f -- "$body"; [[ $http_status == 408 || $http_status == 429 || $http_status == 5* ]] && return 75 || return 1; }
-  elif [[ $http_status != "$expected_status" ]]; then
-    rm -f -- "$body"
-    [[ $http_status == 408 || $http_status == 429 || $http_status == 5* ]] && return 75 || return 1
-  fi
-  case $probe in
-    cloudflare)
-      grep -q '^ip=.' "$body" || { rm -f -- "$body"; return 1; }
-      location=$(sed -n 's/^loc=//p' "$body" | sed -n '1p')
-      PROXYCODE_PROBE_LOCATION=$location
-      [[ -z $expectation || $location == "$expectation" ]] || { rm -f -- "$body"; return 1; }
-      ;;
-    mullvad)
-      grep -Eq '"mullvad_exit_ip"[[:space:]]*:[[:space:]]*true' "$body" || { rm -f -- "$body"; return 1; }
-      location=$(sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$body" | sed -n '1p')
-      PROXYCODE_PROBE_LOCATION=$location
-      [[ -z $expectation || $location == "$expectation" ]] || { rm -f -- "$body"; return 1; }
-      ;;
-    custom) [[ -z $contains ]] || grep -Fq -- "$contains" "$body" || { rm -f -- "$body"; return 1; } ;;
-  esac
   rm -f -- "$body"
-  PROXYCODE_PROBE_LOCATION=$location
+  return "$status"
+}
+
+proxycode_write_active_state() {
+  proxycode_write_private "$PROXYCODE_RUNTIME_DIR/active" <<EOF
+PROFILE=$1
+PID=$2
+START_TIME=$3
+READY=$4
+EOF
 }
 
 proxycode_run_probe() {
@@ -794,13 +829,7 @@ proxycode_start_locked() {
   chmod 700 "$log_directory" || return 1
   touch "$log" && chmod 600 "$log" || return 1
   proxycode_rotate_log "$name" || { proxycode_error 'could not rotate the WireProxy log'; return; }
-  if ! proxycode_write_private "$PROXYCODE_RUNTIME_DIR/active" <<EOF
-PROFILE=$name
-PID=unavailable
-START_TIME=unavailable
-READY=0
-EOF
-  then
+  if ! proxycode_write_active_state "$name" unavailable unavailable 0; then
     proxycode_error 'could not reserve active process state'
     return
   fi
@@ -820,13 +849,7 @@ EOF
     proxycode_error 'WireProxy process identity could not be read; ambiguous state was retained if it may still be running'
     return
   fi
-  if ! proxycode_write_private "$PROXYCODE_RUNTIME_DIR/active" <<EOF
-PROFILE=$name
-PID=$pid
-START_TIME=$started
-READY=0
-EOF
-  then
+  if ! proxycode_write_active_state "$name" "$pid" "$started" 0; then
     if proxycode_wait_for_process_match "$pid" "$started" "$executable" "$config" &&
       proxycode_terminate_verified "$pid" "$started" "$executable" "$config"; then
       rm -f -- "$PROXYCODE_RUNTIME_DIR/active"
@@ -854,13 +877,7 @@ EOF
     proxycode_error 'WireProxy process identity changed after the health check; provisional state was retained'
     return
   fi
-  if ! proxycode_write_private "$PROXYCODE_RUNTIME_DIR/active" <<EOF
-PROFILE=$name
-PID=$pid
-START_TIME=$started
-READY=1
-EOF
-  then
+  if ! proxycode_write_active_state "$name" "$pid" "$started" 1; then
     if proxycode_terminate_verified "$pid" "$started" "$executable" "$config"; then
       rm -f -- "$PROXYCODE_RUNTIME_DIR/active"
     else

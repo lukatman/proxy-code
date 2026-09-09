@@ -168,11 +168,6 @@ fi
 # shellcheck source=lib/proxycode.sh
 source "$source_root/lib/proxycode.sh"
 proxycode_init_paths || exit 1
-live_home=$HOME
-live_xdg_config=${XDG_CONFIG_HOME:-}
-live_xdg_data=${XDG_DATA_HOME:-}
-live_xdg_state=${XDG_STATE_HOME:-}
-live_xdg_runtime=${XDG_RUNTIME_DIR:-}
 live_config_dir=$PROXYCODE_CONFIG_DIR
 live_data_dir=$PROXYCODE_DATA_DIR
 live_state_dir=$PROXYCODE_STATE_DIR
@@ -304,25 +299,9 @@ if [[ -z $mode ]]; then
         fi
         proxycode_prompt 'HTTP listener port' 25345 || exit 2
         http_port=$PROXYCODE_ANSWER
-        proxycode_choose 'Health probe' 'Cloudflare' 'Mullvad' 'Custom HTTPS URL' || exit 2
-        case $PROXYCODE_CHOICE in
-          1)
-            probe=cloudflare
-            proxycode_prompt 'Expected country code, or blank for any' || exit 2
-            expectation=$PROXYCODE_ANSWER
-            ;;
-          2)
-            probe=mullvad
-            proxycode_prompt 'Expected location, or blank for any' || exit 2
-            expectation=$PROXYCODE_ANSWER
-            ;;
-          3)
-            probe=custom
-            proxycode_prompt 'HTTPS probe URL' || exit 2; url=$PROXYCODE_ANSWER
-            proxycode_prompt 'Expected HTTP status' 200 || exit 2; expected_status=$PROXYCODE_ANSWER
-            proxycode_prompt 'Required response text, or blank for any' || exit 2; contains=$PROXYCODE_ANSWER
-            ;;
-        esac
+        proxycode_prompt_probe_settings || exit 2
+        probe=${PROXYCODE_PROBE_SETTINGS[0]} expectation=${PROXYCODE_PROBE_SETTINGS[1]}
+        url=${PROXYCODE_PROBE_SETTINGS[2]} expected_status=${PROXYCODE_PROBE_SETTINGS[3]} contains=${PROXYCODE_PROBE_SETTINGS[4]}
       fi
     else
       proxycode_choose 'WireProxy source' 'Pinned WireProxy v1.1.3' 'Custom executable' || exit 2
@@ -498,38 +477,38 @@ if [[ $mode == profile ]]; then
     $replace || die "Tunnel Profile '$name' already exists; use --replace" 2
   fi
 
-  export HOME=$work_dir/setup/home
-  export XDG_CONFIG_HOME=$work_dir/setup/config XDG_DATA_HOME=$work_dir/setup/data XDG_STATE_HOME=$work_dir/setup/state XDG_RUNTIME_DIR=$work_dir/setup/runtime
-  mkdir -p "$HOME" "$XDG_RUNTIME_DIR" || die 'cannot prepare Profile staging'
-  proxycode_init_paths || die 'cannot initialize Profile staging'
-  proxycode_prepare_storage || die 'cannot prepare Profile staging'
-  mkdir -p "$PROXYCODE_DATA_DIR/bin" "$PROXYCODE_STATE_DIR" "$PROXYCODE_RUNTIME_DIR" || die 'cannot prepare Profile staging'
-  chmod 700 "$PROXYCODE_DATA_DIR/bin" "$PROXYCODE_STATE_DIR" "$PROXYCODE_RUNTIME_DIR" || die 'cannot secure Profile staging'
-  cp -- "$work_dir/payload/wireproxy" "$PROXYCODE_DATA_DIR/bin/wireproxy" || die 'cannot stage WireProxy for Profile validation'
-  if [[ -r $live_config_dir/settings ]]; then
-    cp -- "$live_config_dir/settings" "$PROXYCODE_CONFIG_DIR/settings" || die 'cannot stage listener settings'
-  fi
-  if [[ -d $live_profile ]]; then
-    cp -R -- "$live_profile" "$PROXYCODE_DATA_DIR/profiles/$name" || die 'cannot stage the existing Tunnel Profile'
-  fi
-  [[ -z $http_port ]] || proxycode_settings_update "$http_port" >/dev/null || die 'invalid HTTP listener settings' 2
-  proxycode_profile_import "$source_file" "$name" "$make_default" "$replace" true >/dev/null || die 'WireGuard configuration validation failed'
-  if [[ -n $probe ]]; then
-    proxycode_profile_settings_update "$name" "$probe" "$expectation" "$url" "$expected_status" "$contains" >/dev/null || die 'invalid probe settings' 2
-  elif [[ -n $expectation$url$expected_status$contains ]]; then
-    die '--expect-location, --url, --status, and --contains require --probe' 2
-  fi
-  setup_profile=$PROXYCODE_DATA_DIR/profiles/$name
-  setup_settings=$PROXYCODE_CONFIG_DIR/settings
-  review_http_port=$(proxycode_read_setting "$PROXYCODE_CONFIG_DIR/settings" HTTP_PORT)
-  review_default_profile=$(proxycode_read_setting "$PROXYCODE_CONFIG_DIR/settings" DEFAULT_PROFILE)
+  (
+    export HOME=$work_dir/setup/home
+    export XDG_CONFIG_HOME=$work_dir/setup/config XDG_DATA_HOME=$work_dir/setup/data XDG_STATE_HOME=$work_dir/setup/state XDG_RUNTIME_DIR=$work_dir/setup/runtime
+    mkdir -p "$HOME" "$XDG_RUNTIME_DIR" || die 'cannot prepare Profile staging'
+    proxycode_init_paths || die 'cannot initialize Profile staging'
+    proxycode_prepare_storage || die 'cannot prepare Profile staging'
+    mkdir -p "$PROXYCODE_DATA_DIR/bin" "$PROXYCODE_STATE_DIR" "$PROXYCODE_RUNTIME_DIR" || die 'cannot prepare Profile staging'
+    chmod 700 "$PROXYCODE_DATA_DIR/bin" "$PROXYCODE_STATE_DIR" "$PROXYCODE_RUNTIME_DIR" || die 'cannot secure Profile staging'
+    cp -- "$work_dir/payload/wireproxy" "$PROXYCODE_DATA_DIR/bin/wireproxy" || die 'cannot stage WireProxy for Profile validation'
+    if [[ -r $live_config_dir/settings ]]; then
+      cp -- "$live_config_dir/settings" "$PROXYCODE_CONFIG_DIR/settings" || die 'cannot stage listener settings'
+    fi
+    if [[ -d $live_profile ]]; then
+      cp -R -- "$live_profile" "$PROXYCODE_DATA_DIR/profiles/$name" || die 'cannot stage the existing Tunnel Profile'
+    fi
+    [[ -z $http_port ]] || proxycode_settings_update "$http_port" >/dev/null || die 'invalid HTTP listener settings' 2
+    proxycode_profile_import "$source_file" "$name" "$make_default" "$replace" true >/dev/null || die 'WireGuard configuration validation failed'
+    if [[ -n $probe ]]; then
+      proxycode_profile_settings_update "$name" "$probe" "$expectation" "$url" "$expected_status" "$contains" >/dev/null || die 'invalid probe settings' 2
+    elif [[ -n $expectation$url$expected_status$contains ]]; then
+      die '--expect-location, --url, --status, and --contains require --probe' 2
+    fi
+  ) || exit $?
+  setup_profile=$work_dir/setup/data/proxycode/profiles/$name
+  setup_settings=$work_dir/setup/config/proxycode/settings
+  review_http_port=$(proxycode_read_setting "$setup_settings" HTTP_PORT)
+  review_default_profile=$(proxycode_read_setting "$setup_settings" DEFAULT_PROFILE)
   review_probe=$(proxycode_read_setting "$setup_profile/settings" PROBE)
   review_expectation=$(proxycode_read_setting "$setup_profile/settings" EXPECT_LOCATION)
   review_url=$(proxycode_read_setting "$setup_profile/settings" URL)
   review_status=$(proxycode_read_setting "$setup_profile/settings" STATUS)
   review_contains=$(proxycode_read_setting "$setup_profile/settings" CONTAINS)
-  export HOME=$live_home XDG_CONFIG_HOME=$live_xdg_config XDG_DATA_HOME=$live_xdg_data XDG_STATE_HOME=$live_xdg_state XDG_RUNTIME_DIR=$live_xdg_runtime
-  proxycode_init_paths || exit 1
 fi
 
 if $interactive; then
@@ -591,33 +570,24 @@ directories=(
   "$PROXYCODE_DATA_DIR/profiles"
   "$PROXYCODE_STATE_DIR"
 )
-sources=(
-  "$work_dir/payload/wireproxy"
-  "$work_dir/payload/proxycode.sh"
-  "$work_dir/payload/wireproxy.LICENSE"
-  "$work_dir/payload/proxycode"
-)
-targets=(
-  "$PROXYCODE_DATA_DIR/bin/wireproxy"
-  "$PROXYCODE_DATA_DIR/lib/proxycode.sh"
-  "$PROXYCODE_DATA_DIR/licenses/wireproxy.LICENSE"
-  "$PROXYCODE_BIN_DIR/proxycode"
-)
-modes=(700 600 600 700)
+sources=() targets=() modes=()
+add_install_file() {
+  sources+=("$1")
+  targets+=("$2")
+  modes+=("$3")
+}
+add_install_file "$work_dir/payload/wireproxy" "$PROXYCODE_DATA_DIR/bin/wireproxy" 700
+add_install_file "$work_dir/payload/proxycode.sh" "$PROXYCODE_DATA_DIR/lib/proxycode.sh" 600
+add_install_file "$work_dir/payload/wireproxy.LICENSE" "$PROXYCODE_DATA_DIR/licenses/wireproxy.LICENSE" 600
+add_install_file "$work_dir/payload/proxycode" "$PROXYCODE_BIN_DIR/proxycode" 700
 if [[ $mode == profile ]]; then
   directories+=("$PROXYCODE_DATA_DIR/profiles/$name")
   for profile_file in wireguard.conf wireproxy.conf settings proxy-credential; do
-    sources+=("$setup_profile/$profile_file")
-    targets+=("$PROXYCODE_DATA_DIR/profiles/$name/$profile_file")
-    modes+=(600)
+    add_install_file "$setup_profile/$profile_file" "$PROXYCODE_DATA_DIR/profiles/$name/$profile_file" 600
   done
-  sources+=("$setup_settings")
-  targets+=("$PROXYCODE_CONFIG_DIR/settings")
-  modes+=(600)
+  add_install_file "$setup_settings" "$PROXYCODE_CONFIG_DIR/settings" 600
 fi
-sources+=("$work_dir/payload/install")
-targets+=("$PROXYCODE_STATE_DIR/install")
-modes+=(600)
+add_install_file "$work_dir/payload/install" "$PROXYCODE_STATE_DIR/install" 600
 new_directories=()
 temporaries=()
 existed=()

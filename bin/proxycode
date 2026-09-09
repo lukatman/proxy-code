@@ -34,7 +34,7 @@ interactive_import() {
 }
 
 interactive_settings() {
-  local port probe expectation='' url='' status='' contains=''
+  local port
   proxycode_choose 'Settings' 'HTTP listener port' 'Tunnel Profile health probe' 'Back' || return 2
   case $PROXYCODE_CHOICE in
     1)
@@ -45,18 +45,8 @@ interactive_settings() {
       ;;
     2)
       choose_profile 'Choose a Tunnel Profile' || return
-      proxycode_choose 'Health probe' 'Cloudflare' 'Mullvad' 'Custom HTTPS URL' || return 2
-      case $PROXYCODE_CHOICE in
-        1) probe=cloudflare; proxycode_prompt 'Expected country code, or blank for any' || return 2; expectation=$PROXYCODE_ANSWER ;;
-        2) probe=mullvad; proxycode_prompt 'Expected location, or blank for any' || return 2; expectation=$PROXYCODE_ANSWER ;;
-        3)
-          probe=custom
-          proxycode_prompt 'HTTPS probe URL' || return 2; url=$PROXYCODE_ANSWER
-          proxycode_prompt 'Expected HTTP status' 200 || return 2; status=$PROXYCODE_ANSWER
-          proxycode_prompt 'Required response text, or blank for any' || return 2; contains=$PROXYCODE_ANSWER
-          ;;
-      esac
-      proxycode_profile_settings_update "$PROXYCODE_SELECTED_PROFILE" "$probe" "$expectation" "$url" "$status" "$contains"
+      proxycode_prompt_probe_settings || return 2
+      proxycode_profile_settings_update "$PROXYCODE_SELECTED_PROFILE" "${PROXYCODE_PROBE_SETTINGS[@]}"
       ;;
   esac
 }
